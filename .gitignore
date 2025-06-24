@@ -199,3 +199,9 @@ cython_debug/
 config/*.xlsx
 logs/
 outputs/
+
+# SSH Keys (Security)
+id_ed25519*
+id_rsa*
+*.pem
+*.key
