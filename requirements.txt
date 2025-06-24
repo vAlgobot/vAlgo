@@ -1,0 +1,10 @@
+pandas
+openpyxl
+duckdb
+requests
+websocket-client
+matplotlib
+numpy
+tqdm
+python-dotenv
+xlrd
