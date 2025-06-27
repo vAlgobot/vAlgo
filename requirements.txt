@@ -3,8 +3,17 @@ openpyxl
 duckdb
 requests
 websocket-client
+websockets
 matplotlib
 numpy
 tqdm
 python-dotenv
 xlrd
+ta
+plotly
+pytest
+black
+ruff
+fastapi
+uvicorn
+openalgo
