@@ -223,12 +223,14 @@ class ConfigLoader:
                 return TradingMode.PAPER
             elif mode_str == 'live':
                 return TradingMode.LIVE
+            elif mode_str == 'dataload':
+                return TradingMode.DATALOAD
             else:
                 self.logger.warning(f"Invalid trading mode: {mode_str}, defaulting to backtest")
                 return TradingMode.BACKTEST
         else:
             # String-style fallback
-            valid_modes = ['backtest', 'paper', 'live']
+            valid_modes = ['backtest', 'paper', 'live', 'dataload']
             if mode_str in valid_modes:
                 return mode_str
             else:
@@ -261,12 +263,19 @@ class ConfigLoader:
         active_brokers = []
         
         for _, row in df.iterrows():
-            if row.get('Status', '').lower() == 'active':
+            # Safe string conversion for Status field
+            status_value = row.get('Status', '')
+            status_str = str(status_value).lower().strip() if pd.notna(status_value) else ''
+            
+            if status_str == 'active':
                 broker_config = {
                     'broker': row.get('Broker', ''),
                     'api_key': row.get('API Key', ''),
                     'secret': row.get('Secret', ''),
-                    'user_id': row.get('User ID', '')
+                    'user_id': row.get('User ID', ''),
+                    'openalgo_api_key': row.get('OpenAlgo_API_Key', ''),
+                    'openalgo_host': row.get('OpenAlgo_Host', 'http://127.0.0.1:5000'),
+                    'openalgo_ws_url': row.get('OpenAlgo_WS_URL', 'ws://127.0.0.1:8765')
                 }
                 active_brokers.append(broker_config)
         
@@ -288,16 +297,65 @@ class ConfigLoader:
         active_instruments = []
         
         for _, row in df.iterrows():
-            if row.get('Status', '').lower() == 'active':
-                instrument_config = {
-                    'symbol': row.get('Symbol', ''),
-                    'timeframe': row.get('Timeframe', '1min'),
-                    'status': row.get('Status', '')
-                }
-                active_instruments.append(instrument_config)
+            # Safe string conversion for Status field
+            status_value = row.get('Status', '')
+            if pd.notna(status_value):
+                status_str = str(status_value).lower().strip()
+            else:
+                status_str = ''
+            
+            if status_str == 'active':
+                # Safe string conversion for all fields
+                symbol_value = row.get('Symbol', '')
+                symbol_str = str(symbol_value).strip() if pd.notna(symbol_value) else ''
+                
+                timeframe_value = row.get('Timeframe', '1min')
+                timeframe_str = str(timeframe_value).strip() if pd.notna(timeframe_value) else '1min'
+                
+                exchange_value = row.get('Exchange', 'NSE')
+                exchange_str = str(exchange_value).strip() if pd.notna(exchange_value) else 'NSE'
+                
+                if symbol_str:  # Only add if symbol is not empty
+                    instrument_config = {
+                        'symbol': symbol_str,
+                        'timeframe': timeframe_str,
+                        'status': status_str,
+                        'exchange': exchange_str
+                    }
+                    active_instruments.append(instrument_config)
         
         self.logger.info(f"Found {len(active_instruments)} active instruments")
         return active_instruments
+    
+    def get_primary_broker_openalgo_config(self) -> Dict[str, str]:
+        """
+        Get OpenAlgo configuration for the primary (first active) broker.
+        
+        Returns:
+            Dict with OpenAlgo configuration for primary broker
+        """
+        active_brokers = self.get_active_brokers()
+        
+        if not active_brokers:
+            self.logger.warning("No active brokers found")
+            return {
+                'api_key': '',
+                'host': 'http://127.0.0.1:5000',
+                'ws_url': 'ws://127.0.0.1:8765'
+            }
+        
+        # Use the first active broker as primary
+        primary_broker = active_brokers[0]
+        
+        openalgo_config = {
+            'api_key': primary_broker.get('openalgo_api_key', ''),
+            'host': primary_broker.get('openalgo_host', 'http://127.0.0.1:5000'),
+            'ws_url': primary_broker.get('openalgo_ws_url', 'ws://127.0.0.1:8765'),
+            'broker_name': primary_broker.get('broker', '')
+        }
+        
+        self.logger.info(f"Using primary broker: {openalgo_config['broker_name']}")
+        return openalgo_config
     
     def get_indicator_config(self) -> List[Dict[str, Any]]:
         """
@@ -314,7 +372,11 @@ class ConfigLoader:
         indicator_configs = []
         
         for _, row in df.iterrows():
-            if row.get('Status', '').lower() == 'active':
+            # Safe string conversion for Status field
+            status_value = row.get('Status', '')
+            status_str = str(status_value).lower().strip() if pd.notna(status_value) else ''
+            
+            if status_str == 'active':
                 # Parse parameters
                 params_str = row.get('Parameters', '')
                 parameters = []

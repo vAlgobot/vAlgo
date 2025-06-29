@@ -25,6 +25,7 @@ class TradingMode(Enum):
     BACKTEST = "backtest"
     PAPER = "paper" 
     LIVE = "live"
+    DATALOAD = "dataload"
 
 # Timeframes
 class Timeframe(Enum):
