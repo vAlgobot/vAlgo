@@ -241,3 +241,9 @@ tmp/
 # Strategy performance data
 performance_reports/
 equity_curves/
+
+# Development files (keep local)
+Project_Tracker.xlsx
+config/config_backup*.xlsx
+docs_archive/
+test/
