@@ -95,14 +95,14 @@ class DataLoadManager:
             if not self._initialize_database():
                 return False
             
-            # Step 5: Force cleanup of any invalid timestamps before loading
-            print("\n=== CLEANING UP INVALID TIMESTAMPS ===")
-            print("🧹 Ensuring database is clean before data loading...")
-            cleanup_count = self.database_manager.cleanup_invalid_timestamps()
-            if cleanup_count > 0:
-                print(f"✅ Cleaned up {cleanup_count} invalid timestamp records")
+            # Step 5: Prepare for incremental data loading
+            print("\n=== PREPARING FOR INCREMENTAL DATA LOADING ===")
+            print("📊 Checking existing data coverage...")
+            existing_data_summary = self._get_existing_data_summary()
+            if existing_data_summary:
+                print(f"✅ Found existing data: {existing_data_summary}")
             else:
-                print("✅ Database is already clean")
+                print("✅ No existing data found - fresh data loading")
             
             # Step 6: Load data for all instruments
             if not self._load_all_instruments():
@@ -422,13 +422,13 @@ class DataLoadManager:
                 }
                 return False
             
-            # Store in database
+            # Store in database with incremental loading (replace=False)
             success = self.database_manager.store_ohlcv_data(
                 symbol=symbol,
                 exchange=exchange,
                 timeframe=timeframe,
                 data=data,
-                replace=True
+                replace=False  # Incremental loading - only insert new records
             )
             
             if success:
@@ -478,7 +478,7 @@ class DataLoadManager:
     
     def _export_instrument_to_csv(self, symbol: str, exchange: str, timeframe: str, 
                                  start_date: str, end_date: str) -> None:
-        """Export instrument data to CSV file."""
+        """Export ALL available instrument data from database to CSV file."""
         try:
             # Create exports directory
             export_dir = Path("outputs/data_exports")
@@ -488,23 +488,54 @@ class DataLoadManager:
             filename = f"{symbol}_{timeframe}.csv"
             export_path = export_dir / filename
             
-            print(f"    📄 Exporting to CSV: {filename} ({start_date} to {end_date})...")
+            # Get actual database coverage for this instrument
+            try:
+                coverage_query = """
+                SELECT MIN(DATE(timestamp)) as min_date, MAX(DATE(timestamp)) as max_date, COUNT(*) as total_records
+                FROM ohlcv_data 
+                WHERE symbol = ? AND exchange = ? AND timeframe = ?
+                """
+                coverage_result = self.database_manager.connection.execute(coverage_query, [
+                    symbol.upper(), exchange.upper(), timeframe.lower()
+                ]).fetchone()
+                
+                if coverage_result and coverage_result[0]:
+                    db_start, db_end, db_records = coverage_result
+                    coverage_info = f"all {db_records:,} records ({db_start} to {db_end})"
+                else:
+                    coverage_info = "no data found in database"
+            except Exception:
+                coverage_info = "all available records"
             
-            # Export data using DatabaseManager with date range filter
+            print(f"    📄 Exporting to CSV: {filename} ({coverage_info})...")
+            
+            # Export ALL data from database (no date range filter)
             success = self.database_manager.export_data(
                 symbol=symbol,
                 exchange=exchange,
                 timeframe=timeframe,
                 output_path=str(export_path),
-                format="csv",
-                start_date=start_date,
-                end_date=end_date
+                format="csv"
+                # No start_date/end_date = exports all database records
             )
             
             if success and export_path.exists():
-                # Get file size
+                # Get file size and record count
                 file_size_kb = export_path.stat().st_size / 1024
-                print(f"    ✅ CSV exported: {export_path} ({file_size_kb:.1f} KB)")
+                
+                # Get actual exported record count from database
+                try:
+                    count_query = """
+                    SELECT COUNT(*) FROM ohlcv_data 
+                    WHERE symbol = ? AND exchange = ? AND timeframe = ?
+                    """
+                    record_count = self.database_manager.connection.execute(count_query, [
+                        symbol.upper(), exchange.upper(), timeframe.lower()
+                    ]).fetchone()[0]
+                    
+                    print(f"    ✅ CSV exported: {export_path.name} ({record_count:,} records, {file_size_kb:.1f} KB)")
+                except Exception:
+                    print(f"    ✅ CSV exported: {export_path.name} ({file_size_kb:.1f} KB)")
                 
                 # Update stats
                 if symbol not in self.stats['instruments_status']:
@@ -604,6 +635,39 @@ class DataLoadManager:
                 
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
+    
+    def _get_existing_data_summary(self) -> str:
+        """Get summary of existing data in database."""
+        try:
+            if not self.database_manager:
+                return ""
+            
+            # Get data summary from database
+            summary_query = """
+            SELECT symbol, exchange, timeframe, 
+                   MIN(DATE(timestamp)) as start_date,
+                   MAX(DATE(timestamp)) as end_date,
+                   COUNT(*) as records
+            FROM ohlcv_data 
+            GROUP BY symbol, exchange, timeframe
+            ORDER BY symbol
+            """
+            
+            result = self.database_manager.connection.execute(summary_query).fetchall()
+            
+            if not result:
+                return ""
+            
+            summaries = []
+            for row in result:
+                symbol, exchange, timeframe, start_date, end_date, records = row
+                summaries.append(f"{symbol} ({timeframe}): {records:,} records ({start_date} to {end_date})")
+            
+            return "; ".join(summaries)
+            
+        except Exception as e:
+            self.logger.error(f"Error getting existing data summary: {e}")
+            return ""
 
 
 def main():

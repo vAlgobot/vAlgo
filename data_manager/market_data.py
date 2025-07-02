@@ -346,6 +346,9 @@ class MarketDataManager:
                     self.logger.error(f"Error fetching batch {chunk_count} for {symbol}: {e}")
                     # Continue with next batch even if one fails
                 
+                # Move to next chunk: ensure we don't miss the last day
+                if current_end >= end_dt:
+                    break
                 current_start = current_end
             
             # Combine all batches
@@ -364,6 +367,26 @@ class MarketDataManager:
                     combined_df = combined_df.sort_values('timestamp')
                 else:
                     combined_df = combined_df.sort_index()
+                
+                # Validate actual vs requested date range
+                if not combined_df.empty:
+                    if 'timestamp' in combined_df.columns:
+                        actual_start = combined_df['timestamp'].min().strftime('%Y-%m-%d')
+                        actual_end = combined_df['timestamp'].max().strftime('%Y-%m-%d')
+                    else:
+                        actual_start = combined_df.index.min().strftime('%Y-%m-%d')
+                        actual_end = combined_df.index.max().strftime('%Y-%m-%d')
+                    
+                    requested_start = start_dt.strftime('%Y-%m-%d')
+                    requested_end = end_dt.strftime('%Y-%m-%d')
+                    
+                    print(f"    📅 Date Range Validation:")
+                    print(f"       Requested: {requested_start} to {requested_end}")
+                    print(f"       Actual:    {actual_start} to {actual_end}")
+                    
+                    if actual_end != requested_end:
+                        print(f"    ⚠️  WARNING: End date mismatch! Missing {requested_end}")
+                        self.logger.warning(f"Date range mismatch for {symbol}: requested {requested_start} to {requested_end}, got {actual_start} to {actual_end}")
                 
                 print(f"    🔗 Combining {len(all_data)} batches into final dataset...")
                 self.logger.info(f"Successfully combined {len(all_data)} batches into {len(combined_df)} records for {symbol}")

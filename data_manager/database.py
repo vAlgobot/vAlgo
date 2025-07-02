@@ -189,21 +189,20 @@ class DatabaseManager:
                 self.logger.warning(f"No valid data after preparation for {symbol}")
                 return False
             
-            # NUCLEAR CLEANUP: Force delete existing data and any epoch records
+            # Incremental loading: Only delete existing data if replace=True
             if replace:
-                # Delete existing data for this symbol
+                # Delete existing data for this symbol only
                 self._delete_existing_data(symbol, exchange, timeframe)
-                
-                # FORCE DELETE any epoch timestamps from entire database (nuclear option)
-                epoch_cleanup_sql = f"""
-                DELETE FROM {self.table_name} 
-                WHERE timestamp <= '1970-01-01 01:00:00' 
-                   OR DATE(timestamp) = '1970-01-01'
-                """
-                self.connection.execute(epoch_cleanup_sql)
-                self.logger.info("Force deleted any epoch timestamps from database")
+                self.logger.info(f"Replaced existing data for {symbol} ({exchange}, {timeframe})")
             
-            # Insert data
+            # Filter out existing records for incremental loading
+            if not replace:
+                df_to_store = self._filter_existing_records(df_to_store, symbol, exchange, timeframe)
+                if df_to_store.empty:
+                    self.logger.info(f"No new records to insert for {symbol} - all data already exists")
+                    return True
+            
+            # Insert data (only new records if replace=False)
             insert_count = self._insert_ohlcv_data(df_to_store)
             
             # Update metadata
@@ -414,17 +413,42 @@ class DatabaseManager:
                 self.logger.warning("No valid data to insert after removing null timestamps")
                 return 0
             
-            # Use DuckDB's efficient DataFrame insertion
+            # Use DuckDB's efficient DataFrame insertion with duplicate handling
             self.connection.register('temp_df', df_clean)
             
-            insert_sql = f"""
-            INSERT INTO {self.table_name} 
-            (symbol, exchange, timeframe, timestamp, open, high, low, close, volume)
-            SELECT symbol, exchange, timeframe, timestamp, open, high, low, close, volume 
-            FROM temp_df
-            """
-            
-            self.connection.execute(insert_sql)
+            # Try INSERT OR IGNORE first (if supported), otherwise use regular INSERT
+            try:
+                insert_sql = f"""
+                INSERT OR IGNORE INTO {self.table_name} 
+                (symbol, exchange, timeframe, timestamp, open, high, low, close, volume)
+                SELECT symbol, exchange, timeframe, timestamp, open, high, low, close, volume 
+                FROM temp_df
+                """
+                self.connection.execute(insert_sql)
+                self.logger.info("Used INSERT OR IGNORE for duplicate handling")
+                
+            except Exception as ignore_error:
+                # If INSERT OR IGNORE not supported, try regular INSERT
+                self.logger.warning(f"INSERT OR IGNORE failed ({ignore_error}), trying regular INSERT")
+                
+                try:
+                    insert_sql = f"""
+                    INSERT INTO {self.table_name} 
+                    (symbol, exchange, timeframe, timestamp, open, high, low, close, volume)
+                    SELECT symbol, exchange, timeframe, timestamp, open, high, low, close, volume 
+                    FROM temp_df
+                    """
+                    self.connection.execute(insert_sql)
+                    
+                except Exception as regular_error:
+                    # If regular INSERT also fails, it's likely due to duplicates that weren't filtered
+                    if "violates primary key constraint" in str(regular_error) or "Duplicate key" in str(regular_error):
+                        self.logger.error(f"Primary key constraint violation detected: {regular_error}")
+                        # Re-raise with more context
+                        raise Exception(f"Duplicate filtering failed - records already exist in database: {regular_error}")
+                    else:
+                        # Other error, re-raise as is
+                        raise regular_error
             
             # Clean up temporary registration
             self.connection.unregister('temp_df')
@@ -435,34 +459,155 @@ class DatabaseManager:
             self.logger.error(f"Error inserting data: {e}")
             raise
     
-    def _update_metadata(self, symbol: str, exchange: str, timeframe: str, df: pd.DataFrame) -> None:
-        """Update metadata table with data information."""
+    def _filter_existing_records(self, df: pd.DataFrame, symbol: str, exchange: str, timeframe: str) -> pd.DataFrame:
+        """
+        Filter out records that already exist in the database.
+        
+        Args:
+            df: DataFrame with new records to check
+            symbol: Trading symbol
+            exchange: Exchange name
+            timeframe: Timeframe
+            
+        Returns:
+            pd.DataFrame: Filtered DataFrame with only new records
+        """
         try:
-            start_date = df['timestamp'].min().date()
-            end_date = df['timestamp'].max().date()
-            total_records = len(df)
+            if df.empty:
+                return df
             
-            # Check for missing days (simplified)
-            expected_days = (end_date - start_date).days + 1
-            actual_days = df['timestamp'].dt.date.nunique()
-            missing_days_count = expected_days - actual_days
+            self.logger.info(f"Filtering existing records for {symbol} - input: {len(df)} records")
             
-            missing_days = f"{missing_days_count} potential missing days" if missing_days_count > 0 else "None"
+            # Ensure timestamps are in proper format
+            if 'timestamp' not in df.columns:
+                self.logger.error(f"No timestamp column found in DataFrame for {symbol}")
+                return pd.DataFrame()
             
-            # Upsert metadata
-            upsert_sql = f"""
-            INSERT OR REPLACE INTO {self.metadata_table} 
-            (symbol, exchange, timeframe, start_date, end_date, total_records, 
-             missing_days, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            # Normalize DataFrame timestamps to ensure consistency
+            df_timestamps = pd.to_datetime(df['timestamp'])
+            
+            # Log sample timestamps from DataFrame
+            if not df_timestamps.empty:
+                sample_df_ts = df_timestamps.iloc[0]
+                self.logger.info(f"Sample DataFrame timestamp: {sample_df_ts} (type: {type(sample_df_ts)})")
+            
+            # Get existing timestamps for this symbol/exchange/timeframe
+            existing_query = f"""
+            SELECT DISTINCT timestamp 
+            FROM {self.table_name} 
+            WHERE symbol = ? AND exchange = ? AND timeframe = ?
             """
             
-            self.connection.execute(upsert_sql, [
-                symbol.upper(), exchange.upper(), timeframe.lower(),
-                start_date, end_date, total_records, missing_days
-            ])
+            existing_result = self.connection.execute(existing_query, [
+                symbol.upper(), exchange.upper(), timeframe.lower()
+            ]).fetchall()
             
-            self.logger.debug(f"Updated metadata for {symbol}")
+            if not existing_result:
+                # No existing data, return all records
+                self.logger.info(f"No existing data for {symbol} - inserting all {len(df)} records")
+                return df
+            
+            # Convert existing timestamps to pandas datetime and create set
+            existing_timestamps_raw = [row[0] for row in existing_result]
+            existing_timestamps = set(pd.to_datetime(existing_timestamps_raw))
+            
+            # Log sample timestamps from database
+            if existing_timestamps:
+                sample_db_ts = next(iter(existing_timestamps))
+                self.logger.info(f"Sample database timestamp: {sample_db_ts} (type: {type(sample_db_ts)})")
+                self.logger.info(f"Total existing timestamps in DB: {len(existing_timestamps)}")
+            
+            # Create mask to filter out existing records
+            new_records_mask = ~df_timestamps.isin(existing_timestamps)
+            filtered_df = df[new_records_mask].copy()
+            
+            existing_count = len(df) - len(filtered_df)
+            self.logger.info(f"Filtering results for {symbol}: {existing_count} existing, {len(filtered_df)} new records")
+            
+            # Additional validation: check if any duplicates remain
+            if not filtered_df.empty:
+                remaining_timestamps = set(pd.to_datetime(filtered_df['timestamp']))
+                overlap = remaining_timestamps.intersection(existing_timestamps)
+                if overlap:
+                    self.logger.warning(f"Found {len(overlap)} timestamp overlaps after filtering for {symbol}")
+                    # Remove the overlapping records manually
+                    final_mask = ~pd.to_datetime(filtered_df['timestamp']).isin(overlap)
+                    filtered_df = filtered_df[final_mask].copy()
+                    self.logger.info(f"After overlap removal: {len(filtered_df)} records remain")
+            
+            return filtered_df
+            
+        except Exception as e:
+            self.logger.error(f"Error filtering existing records for {symbol}: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            # On error, return empty DataFrame to avoid duplicates
+            self.logger.warning(f"Returning empty DataFrame for {symbol} due to filtering error")
+            return pd.DataFrame()
+    
+    def _update_metadata(self, symbol: str, exchange: str, timeframe: str, df: pd.DataFrame) -> None:
+        """Update metadata table with data information (incremental-friendly)."""
+        try:
+            if df.empty:
+                return
+            
+            # Get current metadata if exists
+            current_metadata_query = f"""
+            SELECT start_date, end_date, total_records 
+            FROM {self.metadata_table} 
+            WHERE symbol = ? AND exchange = ? AND timeframe = ?
+            """
+            
+            current_result = self.connection.execute(current_metadata_query, [
+                symbol.upper(), exchange.upper(), timeframe.lower()
+            ]).fetchone()
+            
+            # Get actual data range from database (not just this batch)
+            actual_data_query = f"""
+            SELECT MIN(DATE(timestamp)) as min_date, MAX(DATE(timestamp)) as max_date, COUNT(*) as total_records
+            FROM {self.table_name} 
+            WHERE symbol = ? AND exchange = ? AND timeframe = ?
+            """
+            
+            actual_result = self.connection.execute(actual_data_query, [
+                symbol.upper(), exchange.upper(), timeframe.lower()
+            ]).fetchone()
+            
+            if actual_result and actual_result[0]:
+                start_date = actual_result[0]
+                end_date = actual_result[1] 
+                total_records = actual_result[2]
+                
+                # Check for missing days based on actual data range
+                expected_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1
+                
+                actual_days_query = f"""
+                SELECT COUNT(DISTINCT DATE(timestamp)) 
+                FROM {self.table_name} 
+                WHERE symbol = ? AND exchange = ? AND timeframe = ?
+                """
+                actual_days_result = self.connection.execute(actual_days_query, [
+                    symbol.upper(), exchange.upper(), timeframe.lower()
+                ]).fetchone()
+                
+                actual_days = actual_days_result[0] if actual_days_result else 0
+                missing_days_count = expected_days - actual_days
+                missing_days = f"{missing_days_count} potential missing days" if missing_days_count > 0 else "None"
+                
+                # Upsert metadata with actual database coverage
+                upsert_sql = f"""
+                INSERT OR REPLACE INTO {self.metadata_table} 
+                (symbol, exchange, timeframe, start_date, end_date, total_records, 
+                 missing_days, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """
+                
+                self.connection.execute(upsert_sql, [
+                    symbol.upper(), exchange.upper(), timeframe.lower(),
+                    start_date, end_date, total_records, missing_days
+                ])
+                
+                self.logger.debug(f"Updated metadata for {symbol}: {start_date} to {end_date}, {total_records} records")
             
         except Exception as e:
             self.logger.error(f"Error updating metadata: {e}")

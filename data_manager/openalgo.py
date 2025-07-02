@@ -21,6 +21,14 @@ try:
 except ImportError:
     raise ImportError("openalgo library not installed. Run: pip install openalgo")
 
+try:
+    import websocket
+    import json
+    import threading
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+
 from utils.config_loader import ConfigLoader
 from utils.logger import get_logger
 
@@ -360,49 +368,71 @@ class OpenAlgo:
             pd.DataFrame: Historical OHLCV data
         """
         try:
-            # EMERGENCY DEBUG: Log the API call parameters
-            self.logger.info(f"OPENALGO API CALL DEBUG - get_historical_data({symbol}, {exchange}, {interval}, {start_date}, {end_date})")
+            # PRODUCTION DEBUG: Validate 5-minute interval
+            if interval != '5m':
+                self.logger.warning(f"[WARNING] Non-standard interval requested: {interval}. Expected: 5m")
+            
+            # PRODUCTION DEBUG: Log the API call parameters
+            self.logger.info(f"[OPENALGO] API CALL - get_historical_data({symbol}, {exchange}, {interval}, {start_date}, {end_date})")
+            self.logger.info(f"[OPENALGO] Calling client.history() with 5-minute interval")
+            
+            # Validate interval format for OpenAlgo
+            valid_intervals = ['1m', '5m', '15m', '30m', '1h', '1d']
+            if interval not in valid_intervals:
+                raise ValueError(f"Invalid interval: {interval}. Supported: {valid_intervals}")
             
             response = self._handle_api_call(
                 'get_historical_data',
                 self.client.history,
                 symbol=symbol,
                 exchange=exchange,
-                interval=interval,
+                interval=interval,  # This MUST be '5m' for 5-minute candles
                 start_date=start_date,
                 end_date=end_date
             )
 
-            # EMERGENCY DEBUG: Log the raw API response
-            self.logger.info(f"OPENALGO API RESPONSE DEBUG - Status: {response['status']}")
+            # PRODUCTION DEBUG: Log the raw API response for 5-minute candles
+            self.logger.info(f"[OPENALGO] API Response Status: {response['status']}")
             if response['data'] is not None:
-                self.logger.info(f"OPENALGO API RESPONSE DEBUG - Data type: {type(response['data'])}")
+                self.logger.info(f"[OPENALGO] Response Data Type: {type(response['data'])}")
                 if hasattr(response['data'], '__len__'):
-                    self.logger.info(f"OPENALGO API RESPONSE DEBUG - Data length: {len(response['data'])}")
+                    self.logger.info(f"[OPENALGO] Response Data Length: {len(response['data'])} records")
                 if isinstance(response['data'], pd.DataFrame):
-                    self.logger.info(f"OPENALGO API RESPONSE DEBUG - DataFrame columns: {response['data'].columns.tolist()}")
-                    self.logger.info(f"OPENALGO API RESPONSE DEBUG - DataFrame index: {response['data'].index[:5].tolist()}")
-                    self.logger.info(f"OPENALGO API RESPONSE DEBUG - DataFrame index type: {type(response['data'].index)}")
+                    self.logger.info(f"[OPENALGO] DataFrame Columns: {response['data'].columns.tolist()}")
+                    self.logger.info(f"[OPENALGO] DataFrame Index Type: {type(response['data'].index)}")
+                    self.logger.info(f"[OPENALGO] DataFrame Index Sample: {response['data'].index[:3].tolist()}")
+                    
+                    # Check for proper 5-minute interval data
+                    if not response['data'].empty:
+                        sample_data = response['data'].iloc[-1]
+                        self.logger.info(f"[OPENALGO] Latest Candle Data: O:{sample_data.get('open', 0):.2f} H:{sample_data.get('high', 0):.2f} L:{sample_data.get('low', 0):.2f} C:{sample_data.get('close', 0):.2f} V:{sample_data.get('volume', 0)}")
 
             if response['status'] == 'success' and response['data'] is not None:
                 formatted_data = self._format_historical_data(response['data'])
                 
                 # EMERGENCY FIX: If we have sequential integer timestamps, generate proper ones
                 if not formatted_data.empty:
-                    self.logger.info(f"OPENALGO FINAL DEBUG - Returning {len(formatted_data)} records")
-                    self.logger.info(f"OPENALGO FINAL DEBUG - Final index type: {type(formatted_data.index)}")
-                    self.logger.info(f"OPENALGO FINAL DEBUG - Final index sample: {formatted_data.index[:5].tolist()}")
+                    self.logger.info(f"[OPENALGO] Final Result: {len(formatted_data)} 5-minute candles")
+                    self.logger.info(f"[OPENALGO] Final Index Type: {type(formatted_data.index)}")
+                    self.logger.info(f"[OPENALGO] Final Timestamp Range: {formatted_data.index[0]} to {formatted_data.index[-1]}")
+                    
+                    # Validate 5-minute intervals
+                    if len(formatted_data) > 1:
+                        time_diff = (formatted_data.index[1] - formatted_data.index[0]).total_seconds() / 60
+                        self.logger.info(f"[OPENALGO] Interval Validation: {time_diff} minutes between candles (expected: 5)")
+                        if abs(time_diff - 5.0) > 1.0:  # Allow 1-minute tolerance
+                            self.logger.warning(f"[WARNING] Interval mismatch: Got {time_diff} minutes, expected 5 minutes")
                     
                     # Check if the index contains sequential integers (0, 1, 2, 3...)
                     if (formatted_data.index.dtype == 'datetime64[ns]' and 
                         len(formatted_data) > 1 and
                         formatted_data.index[0].year == 1970):  # Epoch timestamps detected
                         
-                        self.logger.warning(f"EMERGENCY FIX - Detected epoch timestamps, generating proper timestamps")
+                        self.logger.warning(f"[TIMESTAMP_FIX] Detected epoch timestamps, generating proper 5-minute timestamps")
                         
                         # Generate proper timestamps based on date range and interval
                         fixed_data = self._fix_timestamp_index(formatted_data, start_date, end_date, interval)
-                        self.logger.info(f"EMERGENCY FIX - Generated timestamps: {fixed_data.index[:3].tolist()} to {fixed_data.index[-3:].tolist()}")
+                        self.logger.info(f"[TIMESTAMP_FIX] Generated 5-minute timestamps: {fixed_data.index[:3].tolist()} to {fixed_data.index[-3:].tolist()}")
                         return fixed_data
                 
                 return formatted_data
@@ -734,6 +764,120 @@ class OpenAlgo:
             dict: Order status
         """
         return self._handle_api_call('get_order_status', self.client.orderstatus, orderid=order_id)
+
+    # WebSocket functionality for live data feeds
+    def start_websocket_feed(self, symbols: List[str], callback_function) -> bool:
+        """
+        Start WebSocket feed for real-time data.
+        
+        Args:
+            symbols: List of symbols to subscribe to
+            callback_function: Function to call with new data
+            
+        Returns:
+            bool: True if WebSocket started successfully
+        """
+        if not WEBSOCKET_AVAILABLE:
+            self.logger.error("WebSocket functionality not available. Install: pip install websocket-client")
+            return False
+        
+        try:
+            self.logger.info(f"Starting WebSocket feed for symbols: {symbols}")
+            
+            # Initialize WebSocket state
+            self.ws_symbols = symbols
+            self.ws_callback = callback_function
+            self.ws_connection = None
+            self.ws_thread = None
+            self.ws_running = False
+            
+            # Start WebSocket connection in separate thread
+            self.ws_thread = threading.Thread(target=self._websocket_worker, daemon=True)
+            self.ws_thread.start()
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to start WebSocket feed: {e}")
+            return False
+    
+    def stop_websocket_feed(self):
+        """Stop WebSocket feed."""
+        try:
+            self.logger.info("Stopping WebSocket feed...")
+            self.ws_running = False
+            
+            if hasattr(self, 'ws_connection') and self.ws_connection:
+                self.ws_connection.close()
+            
+            if hasattr(self, 'ws_thread') and self.ws_thread:
+                self.ws_thread.join(timeout=5)
+            
+            self.logger.info("WebSocket feed stopped")
+            
+        except Exception as e:
+            self.logger.error(f"Error stopping WebSocket feed: {e}")
+    
+    def _websocket_worker(self):
+        """WebSocket worker thread."""
+        try:
+            # Construct WebSocket URL
+            ws_url = self.ws_url or f"{self.host.replace('http', 'ws')}/ws"
+            
+            self.logger.info(f"Connecting to WebSocket: {ws_url}")
+            
+            # Create WebSocket connection
+            self.ws_connection = websocket.WebSocketApp(
+                ws_url,
+                on_open=self._on_websocket_open,
+                on_message=self._on_websocket_message,
+                on_error=self._on_websocket_error,
+                on_close=self._on_websocket_close
+            )
+            
+            self.ws_running = True
+            
+            # Run WebSocket connection
+            self.ws_connection.run_forever()
+            
+        except Exception as e:
+            self.logger.error(f"WebSocket worker error: {e}")
+            self.ws_running = False
+    
+    def _on_websocket_open(self, ws):
+        """WebSocket connection opened."""
+        self.logger.info("WebSocket connection opened")
+        
+        # Subscribe to symbols
+        for symbol in self.ws_symbols:
+            subscribe_msg = {
+                "action": "subscribe",
+                "symbol": symbol,
+                "mode": "live"
+            }
+            ws.send(json.dumps(subscribe_msg))
+            self.logger.info(f"Subscribed to {symbol}")
+    
+    def _on_websocket_message(self, ws, message):
+        """Handle WebSocket message."""
+        try:
+            data = json.loads(message)
+            
+            # Process the message and call user callback
+            if self.ws_callback:
+                self.ws_callback(data)
+                
+        except Exception as e:
+            self.logger.error(f"Error processing WebSocket message: {e}")
+    
+    def _on_websocket_error(self, ws, error):
+        """Handle WebSocket error."""
+        self.logger.error(f"WebSocket error: {error}")
+    
+    def _on_websocket_close(self, ws, close_status_code, close_msg):
+        """Handle WebSocket close."""
+        self.logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
+        self.ws_running = False
 
     def __str__(self) -> str:
         """String representation of OpenAlgo client."""

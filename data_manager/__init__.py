@@ -1,77 +1,25 @@
 """
 Data Manager Module for vAlgo Trading System
-Handles data fetching, storage, and management
+
+This module provides data management capabilities including:
+- OpenAlgo API integration
+- Market data fetching and storage
+- Real-time data streaming
+- Historical data management
+
+Author: vAlgo Development Team
+Created: June 27, 2025
 """
 
-from .openalgo_client import (
-    OpenAlgoClient,
-    TickData,
-    HistoricalData,
-    ConnectionStatus,
-    create_client,
-    test_openalgo_connection
-)
-
-from .openalgo_official_client import (
-    OpenAlgoOfficialClient,
-    create_official_client,
-    test_official_connection
-)
-
-from .database_manager import (
-    DatabaseManager,
-    OHLCVRecord,
-    MarketSession,
-    create_database_manager,
-    get_default_db_path
-)
-
-from .data_fetcher import (
-    DataFetcher,
-    FetchJob,
-    FetchResult,
-    FetchStatus,
-    create_data_fetcher,
-    fetch_historical_data_simple
-)
-
-from .enhanced_data_fetcher import (
-    EnhancedDataFetcher,
-    ClientType,
-    create_enhanced_data_fetcher
-)
+from .openalgo import OpenAlgo
+from .market_data import MarketDataManager
+from .database import DatabaseManager
 
 __all__ = [
-    # OpenAlgo Client (Custom)
-    'OpenAlgoClient',
-    'TickData',
-    'HistoricalData',
-    'ConnectionStatus',
-    'create_client',
-    'test_openalgo_connection',
-    
-    # OpenAlgo Client (Official)
-    'OpenAlgoOfficialClient',
-    'create_official_client',
-    'test_official_connection',
-    
-    # Database Manager
-    'DatabaseManager',
-    'OHLCVRecord',
-    'MarketSession',
-    'create_database_manager',
-    'get_default_db_path',
-    
-    # Data Fetcher
-    'DataFetcher',
-    'FetchJob',
-    'FetchResult',
-    'FetchStatus',
-    'create_data_fetcher',
-    'fetch_historical_data_simple',
-    
-    # Enhanced Data Fetcher
-    'EnhancedDataFetcher',
-    'ClientType',
-    'create_enhanced_data_fetcher'
+    'OpenAlgo',
+    'MarketDataManager',
+    'DatabaseManager'
 ]
+
+__version__ = '1.0.0'
+__author__ = 'vAlgo Development Team'

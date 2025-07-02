@@ -96,17 +96,25 @@ class ConfigLoader:
         # Don't auto-load in init to allow graceful handling
         self._loaded: bool = False
     
-    def load_config(self) -> bool:
+    def load_config(self, force_reload: bool = False) -> bool:
         """
         Load configuration from Excel file
+        
+        Args:
+            force_reload: If True, reload config even if already loaded
         
         Returns:
             True if successful, False otherwise
         """
         global pd
         
-        if self._loaded:
+        if self._loaded and not force_reload:
             return True
+        
+        # Clear existing config data if force reloading
+        if force_reload:
+            self.config_data.clear()
+            self._loaded = False
             
         try:
             if not os.path.exists(self.config_file):
@@ -165,6 +173,16 @@ class ConfigLoader:
         if not self._loaded:
             return self.load_config()
         return True
+    
+    def force_reload_config(self) -> bool:
+        """
+        Force reload configuration from Excel file (clears cache)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        self.logger.info(f"Force reloading configuration from {self.config_file}")
+        return self.load_config(force_reload=True)
     
     def get_initialize_config(self) -> Dict[str, Any]:
         """
@@ -377,15 +395,32 @@ class ConfigLoader:
             status_str = str(status_value).lower().strip() if pd.notna(status_value) else ''
             
             if status_str == 'active':
-                # Parse parameters
-                params_str = row.get('Parameters', '')
+                # Parse parameters with safe handling of float values
+                params_value = row.get('Parameters', '')
                 parameters = []
                 
-                if params_str and params_str != '-':
-                    try:
-                        parameters = [int(x.strip()) for x in params_str.split(',')]
-                    except ValueError:
-                        self.logger.warning(f"Invalid parameters for {row.get('Indicator')}: {params_str}")
+                # Safe string conversion for parameters
+                if pd.notna(params_value) and params_value != '-':
+                    params_str = str(params_value).strip()
+                    if params_str and params_str != 'nan':
+                        try:
+                            # Handle comma-separated values
+                            if ',' in params_str:
+                                # Try to parse as numbers first
+                                try:
+                                    parameters = [int(float(x.strip())) for x in params_str.split(',')]
+                                except (ValueError, TypeError):
+                                    # If numeric parsing fails, treat as string parameters
+                                    parameters = [x.strip() for x in params_str.split(',')]
+                            else:
+                                # Single parameter - try numeric first, then string
+                                try:
+                                    parameters = [int(float(params_str))]
+                                except (ValueError, TypeError):
+                                    parameters = [params_str]
+                        except Exception:
+                            self.logger.warning(f"Could not parse parameters for {row.get('Indicator')}: {params_value}")
+                            parameters = []
                 
                 indicator_config = {
                     'indicator': row.get('Indicator', ''),

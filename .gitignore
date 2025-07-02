@@ -196,7 +196,6 @@ cython_debug/
 *.pyc
 *.db
 .env
-config/*.xlsx
 logs/
 outputs/
 
@@ -205,3 +204,40 @@ id_ed25519*
 id_rsa*
 *.pem
 *.key
+
+# vAlgo Trading System Specific
+# =============================
+
+# Market data files
+data/historical/*.csv
+data/historical/*.parquet
+data/realtime/*.csv
+*.ohlc
+
+# Configuration with secrets (keep template files)
+config/config_prod.xlsx
+config/api_keys.json
+config/broker_secrets.xlsx
+
+# OpenAlgo integration
+openalgo_server/
+openalgo/
+.openalgo_config
+api_credentials.json
+
+# Trading specific outputs
+backtest_results/
+paper_trading_logs/
+live_trading_logs/
+broker_configs/
+
+# Temporary trading files
+temp/
+tmp/
+*.tmp
+*.bak
+*.backup
+
+# Strategy performance data
+performance_reports/
+equity_curves/
