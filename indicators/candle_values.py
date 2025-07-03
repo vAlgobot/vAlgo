@@ -157,16 +157,16 @@ class CandleValues:
             # Clean up temporary columns
             df = df.drop(['open_day', 'high_day', 'low_day', 'close_day'], axis=1)
         else:
-            # FIXED: Use CUMULATIVE approach for backtesting accuracy
+            # OPTIMIZED CUMULATIVE approach for backtesting accuracy
             # This calculates high/low UP TO the current timestamp, not for the entire day
             
-            # Reset index to ensure proper ordering
-            df = df.reset_index(drop=True)
+            # CRITICAL: Ensure proper timestamp ordering within each day for cumulative calculations
+            df = df.sort_values(['date', 'timestamp']).reset_index(drop=True)
             
-            # Calculate cumulative values within each day
+            # PROGRESSIVE CUMULATIVE calculations - exactly as user expects
             df['CurrentDayCandle_Open'] = df.groupby('date')['open'].transform('first')
             
-            # CRITICAL FIX: Cumulative max/min up to current row within each day
+            # FIXED: Progressive cumulative max/min within each day (maintains chronological order)
             df['CurrentDayCandle_High'] = df.groupby('date')['high'].cummax()
             df['CurrentDayCandle_Low'] = df.groupby('date')['low'].cummin()
             

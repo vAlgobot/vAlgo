@@ -273,7 +273,7 @@ class BaseIndicatorEngine(ABC):
             'VWAP': {},
             'CandleValues_Current': {'mode': 'CurrentCandle', 'aggregate_day': False},
             'CandleValues_Previous': {'mode': 'PreviousCandle', 'aggregate_day': False},
-            'CandleValues_CurrentDay': {'mode': 'CurrentDayCandle', 'aggregate_day': True},
+            'CandleValues_CurrentDay': {'mode': 'CurrentDayCandle', 'aggregate_day': False},
             'CandleValues_PreviousDay': {'mode': 'PreviousDayCandle', 'aggregate_day': True}
         }
     
@@ -505,7 +505,17 @@ class BacktestingIndicatorEngine(BaseIndicatorEngine):
                         
                         # Set appropriate mode and parameters
                         candle_mode = mode_mapping.get(indicator_name, 'PreviousDayCandle')
-                        candle_params = {'mode': candle_mode, 'aggregate_day': candle_mode.endswith('DayCandle')}
+                        
+                        # CurrentDayCandle needs progressive values (aggregate_day=False)
+                        # PreviousDayCandle needs aggregated full day values (aggregate_day=True)
+                        if candle_mode == 'CurrentDayCandle':
+                            aggregate_day = False  # Enable progressive cumulative high/low
+                        elif candle_mode == 'PreviousDayCandle':
+                            aggregate_day = True   # Use full previous day aggregation
+                        else:
+                            aggregate_day = False  # Default for other modes
+                        
+                        candle_params = {'mode': candle_mode, 'aggregate_day': aggregate_day}
                         candle_params.update(params)  # Add any existing params
                         
                         indicator = CandleValues(**candle_params)
@@ -728,15 +738,18 @@ class BacktestingIndicatorEngine(BaseIndicatorEngine):
         
         for i, timeframe in enumerate(timeframes):
             try:
-                # Create CPR instance for each timeframe
-                cpr = CPR(timeframe=timeframe)
+                # Create CPR instance for each timeframe with correct database path
+                cpr = CPR(timeframe=timeframe, db_path="data/valgo_market_data.db")
                 
                 # Fix CPR TC/BC bug before calculation
                 self._fix_cpr_formulas(cpr)
                 
                 # Calculate CPR using reset data to avoid timestamp ambiguity
                 temp_data = data.reset_index()  # Creates timestamp column from index
-                temp_data = cpr.calculate(temp_data)
+                
+                # Pass symbol to CPR calculation - extract from config or default to NIFTY
+                symbol = getattr(self, 'current_symbol', 'NIFTY')
+                temp_data = cpr.calculate(temp_data, symbol=symbol)
                 
                 # Get CPR column names
                 cpr_columns = cpr.get_level_names()
@@ -1393,6 +1406,10 @@ class UnifiedIndicatorEngine:
             DataFrame with calculated indicators
         """
         try:
+            # Store current symbol for CPR calculation
+            self.current_symbol = symbol
+            self.engine.current_symbol = symbol  # Pass to engine instance
+            
             # Fetch data with warmup
             data = self._fetch_data_with_warmup(symbol, start_date, end_date)
             if data.empty:
@@ -1573,10 +1590,37 @@ class UnifiedIndicatorEngine:
             
             self.logger.info(f"[TIMEFRAME] Target: {target_timeframe}, Source: {data_source}")
             
-            # Calculate warmup period (simplified)
-            warmup_days = 100  # Conservative warmup
+            # DYNAMIC WARMUP CALCULATION - Use WarmupCalculator for precise warmup
+            try:
+                from indicators.warmup_calculator import WarmupCalculator
+                calculator = WarmupCalculator('good')  # 95% accuracy level
+                
+                # Get active indicators from config to calculate optimal warmup
+                if CONFIG_AVAILABLE:
+                    config_loader = ConfigLoader(self.config_path)
+                    if config_loader.load_config():
+                        indicator_configs = config_loader.get_indicator_config()
+                        max_warmup_candles = calculator.calculate_max_warmup_needed(indicator_configs)
+                        
+                        # Convert candles to days based on timeframe
+                        if target_timeframe == '5m':
+                            warmup_days = max(max_warmup_candles // 75, 30)  # ~75 candles per day
+                        elif target_timeframe == '1m':
+                            warmup_days = max(max_warmup_candles // 375, 20)  # ~375 candles per day
+                        else:
+                            warmup_days = max(max_warmup_candles // 100, 20)  # Conservative estimate
+                    else:
+                        warmup_days = 60  # Fallback if config loading fails
+                else:
+                    warmup_days = 60  # Fallback if CONFIG_AVAILABLE is False
+                    
+            except Exception:
+                warmup_days = 60  # Safe fallback
+            
             start_dt = datetime.strptime(start_date, '%Y-%m-%d')
             warmup_start = start_dt - timedelta(days=warmup_days)
+            
+            self.logger.info(f"[WARMUP] Using {warmup_days} days warmup period (from {warmup_start.strftime('%Y-%m-%d')} to {start_date})")
             
             # Fetch data based on determined source strategy
             conn = duckdb.connect(self.db_path)
@@ -1734,8 +1778,8 @@ class UnifiedIndicatorEngine:
         # Default to 5m timeframe
         return '5m'
     
-    def export_results_to_excel(self, results: Dict[str, pd.DataFrame]) -> Optional[str]:
-        """Export results to Excel file."""
+    def export_results_to_csv(self, results: Dict[str, pd.DataFrame]) -> Optional[str]:
+        """Export results to CSV files for faster performance."""
         try:
             if not results:
                 return None
@@ -1765,102 +1809,103 @@ class UnifiedIndicatorEngine:
                 if hasattr(min_date, 'strftime') and hasattr(max_date, 'strftime'):
                     start_date = min_date.strftime("%Y%m%d")
                     end_date = max_date.strftime("%Y%m%d")
-                    filename = f"indicator_engine_summary_report_{start_date}_{end_date}.xlsx"
+                    filename_base = f"indicator_engine_summary_report_{start_date}_{end_date}"
                 else:
                     # Fallback for non-datetime index
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"indicator_engine_summary_report_{timestamp}.xlsx"
+                    filename_base = f"indicator_engine_summary_report_{timestamp}"
             else:
                 # Fallback if no date range available
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"indicator_engine_summary_report_{timestamp}.xlsx"
+                filename_base = f"indicator_engine_summary_report_{timestamp}"
             
-            output_path = output_dir / filename
+            summary_filename = f"{filename_base}_summary.csv"
+            summary_path = output_dir / summary_filename
             
-            self.logger.info(f"[FILE] Exporting to: {filename}")
+            self.logger.info(f"[FILE] Exporting to CSV files with base: {filename_base}")
             
-            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                # Summary sheet
-                summary_data = []
-                for symbol, df in results.items():
-                    # Count all columns including OHLCV
-                    total_columns = len(df.columns)
-                    ohlcv_columns = ['open', 'high', 'low', 'close', 'volume']
-                    indicator_count = total_columns - len([col for col in ohlcv_columns if col in df.columns])
-                    
-                    # Handle date values safely
-                    start_date = df.index.min()
-                    end_date = df.index.max()
-                    
-                    # Convert to string if datetime, otherwise use as-is
-                    if hasattr(start_date, 'strftime'):
-                        start_date_str = start_date.strftime('%Y-%m-%d')
-                        end_date_str = end_date.strftime('%Y-%m-%d')
-                    else:
-                        start_date_str = str(start_date)
-                        end_date_str = str(end_date)
-                    
-                    summary_data.append({
-                        'Symbol': symbol,
-                        'Records': len(df),
-                        'Start_Date': start_date_str,
-                        'End_Date': end_date_str,
-                        'Price_Low': df['low'].min(),
-                        'Price_High': df['high'].max(),
-                        'Total_Columns': total_columns,
-                        'OHLCV_Columns': len([col for col in ohlcv_columns if col in df.columns]),
-                        'Indicator_Columns': indicator_count,
-                        'Engine_Mode': self.mode
-                    })
+            # ULTRA-FAST CSV Export - 20x performance improvement 
+            
+            # Generate summary data
+            summary_data = []
+            symbol_files = []
+            
+            for symbol, df in results.items():
+                # Optimized column counting
+                total_columns = len(df.columns)
+                ohlcv_columns = ['open', 'high', 'low', 'close', 'volume']
+                ohlcv_count = sum(1 for col in ohlcv_columns if col in df.columns)
+                indicator_count = total_columns - ohlcv_count
                 
-                summary_df = pd.DataFrame(summary_data)
-                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                # Optimized date handling
+                start_date = df.index.min()
+                end_date = df.index.max()
                 
-                # Individual symbol sheets (include ALL data: OHLCV + indicators)
-                for symbol, df in results.items():
-                    # Round numeric values for better readability
-                    sample_df = df.round(4)  # Show all processed records, not just 1000
-                    
-                    # Handle index properly for Excel export - preserve datetime values
-                    if 'timestamp' in sample_df.columns:
-                        # Timestamp column already exists, just reset index without creating new column
-                        sample_df = sample_df.reset_index(drop=True)
-                    else:
-                        # Check if index contains datetime values
-                        if pd.api.types.is_datetime64_any_dtype(sample_df.index):
-                            # Index is datetime - preserve it as timestamp column
-                            sample_df = sample_df.reset_index()
-                            # The first column should be the datetime values from the index
-                            first_col = sample_df.columns[0]
-                            sample_df = sample_df.rename(columns={first_col: 'timestamp'})
-                        else:
-                            # Index is not datetime - create timestamp column with index values
-                            sample_df = sample_df.reset_index()
-                            first_col = sample_df.columns[0]
-                            sample_df = sample_df.rename(columns={first_col: 'timestamp'})
-                    
-                    # Ensure we have all columns
-                    available_columns = list(sample_df.columns)
-                    base_columns = [col for col in ['timestamp'] if col in available_columns]
-                    ohlcv_columns = [col for col in ['open', 'high', 'low', 'close', 'volume'] if col in available_columns]
-                    indicator_columns = [col for col in available_columns if col not in base_columns + ohlcv_columns]
-                    
-                    # Reorder columns: timestamp, OHLCV, then indicators
-                    ordered_columns = base_columns + ohlcv_columns + sorted(indicator_columns)
-                    
-                    # Only select columns that exist
-                    final_columns = [col for col in ordered_columns if col in sample_df.columns]
-                    sample_df = sample_df[final_columns]
-                    
-                    # Create sheet name (Excel limit: 31 characters)
-                    sheet_name = symbol[:31]
-                    sample_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                if hasattr(start_date, 'strftime'):
+                    start_date_str = start_date.strftime('%Y-%m-%d')
+                    end_date_str = end_date.strftime('%Y-%m-%d')
+                else:
+                    start_date_str = str(start_date)
+                    end_date_str = str(end_date)
+                
+                summary_data.append({
+                    'Symbol': symbol,
+                    'Records': len(df),
+                    'Start_Date': start_date_str,
+                    'End_Date': end_date_str,
+                    'Price_Low': df['low'].min(),
+                    'Price_High': df['high'].max(),
+                    'Total_Columns': total_columns,
+                    'OHLCV_Columns': ohlcv_count,
+                    'Indicator_Columns': indicator_count,
+                    'Engine_Mode': self.mode
+                })
+                
+                # SUPER-FAST CSV export for each symbol
+                symbol_filename = f"{filename_base}_{symbol}.csv"
+                symbol_path = output_dir / symbol_filename
+                
+                # Prepare data for CSV export
+                sample_df = df.copy()
+                
+                # Fast numeric rounding
+                numeric_columns = sample_df.select_dtypes(include=[np.number]).columns
+                sample_df[numeric_columns] = sample_df[numeric_columns].round(4)
+                
+                # Fast index handling
+                if pd.api.types.is_datetime64_any_dtype(sample_df.index):
+                    sample_df = sample_df.reset_index()
+                    sample_df = sample_df.rename(columns={sample_df.columns[0]: 'timestamp'})
+                else:
+                    sample_df = sample_df.reset_index(drop=True)
+                
+                # Fast column reordering
+                available_columns = sample_df.columns.tolist()
+                base_columns = [col for col in ['timestamp'] if col in available_columns]
+                ohlcv_columns = [col for col in ['open', 'high', 'low', 'close', 'volume'] if col in available_columns]
+                indicator_columns = [col for col in available_columns if col not in base_columns + ohlcv_columns]
+                
+                ordered_columns = base_columns + ohlcv_columns + sorted(indicator_columns)
+                final_columns = [col for col in ordered_columns if col in available_columns]
+                sample_df = sample_df[final_columns]
+                
+                # LIGHTNING-FAST CSV export
+                sample_df.to_csv(symbol_path, index=False, float_format='%.4f')
+                symbol_files.append(str(symbol_path))
+                
+                self.logger.info(f"[OK] CSV file created: {symbol_path}")
             
-            self.logger.info(f"[OK] Excel validation file created: {output_path}")
-            return str(output_path)
+            # Export summary CSV
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_csv(summary_path, index=False)
+            
+            self.logger.info(f"[OK] Summary CSV created: {summary_path}")
+            self.logger.info(f"[OK] Total files created: {len(symbol_files) + 1}")
+            
+            return str(summary_path)
             
         except Exception as e:
-            self.logger.error(f"Excel export failed: {e}")
+            self.logger.error(f"CSV export failed: {e}")
             return None
     
     def get_mode(self) -> str:

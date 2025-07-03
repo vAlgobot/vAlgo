@@ -758,14 +758,14 @@ class MainIndicatorEngine:
             print(f"[FILE] Generating validation report: {filename}")
             
             # Use unified engine's export function (single report)
-            if self.engine and hasattr(self.engine, 'export_results_to_excel'):
-                excel_path = self.engine.export_results_to_excel(results)
-                if excel_path:
-                    print(f"[OK] Validation report generated: {excel_path}")
-                    return excel_path
+            if self.engine and hasattr(self.engine, 'export_results_to_csv'):
+                csv_path = self.engine.export_results_to_csv(results)
+                if csv_path:
+                    print(f"[OK] Validation report generated: {csv_path}")
+                    return csv_path
             
             # If export fails, return None (no fallback to avoid duplicate reports)
-            print("[WARNING]  Excel export not available")
+            print("[WARNING]  CSV export not available")
             return None
             
         except Exception as e:
@@ -875,10 +875,10 @@ class MainIndicatorEngine:
             # Export if requested
             report_path = None
             if export:
-                if hasattr(self.engine, 'export_results_to_excel'):
-                    report_path = self.engine.export_results_to_excel({symbol: result})
-                elif hasattr(self.engine, 'engine') and hasattr(self.engine.engine, 'export_results_to_excel'):
-                    report_path = self.engine.engine.export_results_to_excel({symbol: result})
+                if hasattr(self.engine, 'export_results_to_csv'):
+                    report_path = self.engine.export_results_to_csv({symbol: result})
+                elif hasattr(self.engine, 'engine') and hasattr(self.engine.engine, 'export_results_to_csv'):
+                    report_path = self.engine.engine.export_results_to_csv({symbol: result})
                 
                 if report_path:
                     print(f"[FILE] Results exported to: {report_path}")
