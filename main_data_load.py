@@ -368,7 +368,7 @@ class DataLoadManager:
             # Calculate days for info display
             start_dt = datetime.strptime(api_start_date, '%Y-%m-%d')
             end_dt = datetime.strptime(api_end_date, '%Y-%m-%d')
-            days_span = (end_dt - start_dt).days
+            days_span = (end_dt - start_dt).days + 1
             
             print(f"Date range: {api_start_date} to {api_end_date} ({days_span} days)")
             print(f"Expected API calls per instrument: ~{days_span // 30 + 1}")
