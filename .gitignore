@@ -245,6 +245,25 @@ tmp/
 performance_reports/
 equity_curves/
 
+# VBT Backtesting System Specific
+# ===============================
+# Virtual environments
+.venv-wsl/
+venv-wsl/
+
+# Data directories (large files)
+data/
+*/data/
+
+# Output directories (generated files)
+output/
+*/output/
+vbt_reports/
+
+# Test directories (temporary)
+rules/tests/
+*/tests/temp/
+
 # Development files (keep local)
 Project_Tracker.xlsx
 config/config_backup*.xlsx
