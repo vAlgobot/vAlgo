@@ -1,0 +1,110 @@
+{
+  "metadata": {
+    "generated_at": "2025-07-29T17:07:16.053438",
+    "version": "1.0",
+    "approach": "config_based_simple",
+    "total_keys": 15,
+    "source": "config.json enabled indicators"
+  },
+  "market_data_keys": {
+    "close": "Closing price series",
+    "open": "Opening price series",
+    "high": "High price series",
+    "low": "Low price series",
+    "volume": "Volume series"
+  },
+  "calculated_indicators": {
+    "rsi_14": "RSI with 14 period",
+    "rsi_21": "RSI with 21 period",
+    "sma_9": "SMA with 9 period",
+    "sma_20": "SMA with 20 period",
+    "sma_50": "SMA with 50 period",
+    "sma_200": "SMA with 200 period",
+    "ma_9": "MA with 9 period",
+    "ma_20": "MA with 20 period",
+    "ma_50": "MA with 50 period",
+    "ma_200": "MA with 200 period"
+  },
+  "all_available_keys": {
+    "close": "Closing price series",
+    "open": "Opening price series",
+    "high": "High price series",
+    "low": "Low price series",
+    "volume": "Volume series",
+    "rsi_14": "RSI with 14 period",
+    "rsi_21": "RSI with 21 period",
+    "sma_9": "SMA with 9 period",
+    "sma_20": "SMA with 20 period",
+    "sma_50": "SMA with 50 period",
+    "sma_200": "SMA with 200 period",
+    "ma_9": "MA with 9 period",
+    "ma_20": "MA with 20 period",
+    "ma_50": "MA with 50 period",
+    "ma_200": "MA with 200 period"
+  },
+  "usage_examples": {
+    "simple_condition": "close > ma_20",
+    "complex_condition": "(close > ma_9) & (ma_9 > ma_20) & (rsi_14 < 70)",
+    "trend_following": "(ma_9 > ma_20) & (ma_20 > ma_50) & (ma_50 > ma_200)",
+    "reversal_strategy": "(rsi_14 < 30) & (close > ma_20)"
+  },
+  "configuration_source": {
+    "enabled_indicators": {
+      "rsi": {
+        "enabled": true,
+        "periods": [
+          14,
+          21
+        ],
+        "talib_function": "RSI",
+        "config": {
+          "periods": [
+            14,
+            21
+          ],
+          "talib_function": "RSI"
+        }
+      },
+      "sma": {
+        "enabled": true,
+        "periods": [
+          9,
+          20,
+          50,
+          200
+        ],
+        "talib_function": "SMA",
+        "config": {
+          "periods": [
+            9,
+            20,
+            50,
+            200
+          ],
+          "talib_function": "SMA"
+        }
+      },
+      "ma": {
+        "enabled": true,
+        "periods": [
+          9,
+          20,
+          50,
+          200
+        ],
+        "talib_function": "SMA",
+        "config": {
+          "periods": [
+            9,
+            20,
+            50,
+            200
+          ],
+          "talib_function": "SMA"
+        }
+      }
+    },
+    "how_to_add_indicators": "Enable indicators in config.json with 'enabled': true",
+    "automatic_update": "This file auto-updates when config.json changes"
+  }
+}

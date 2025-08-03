@@ -1,0 +1,127 @@
+{
+  "system": {
+    "version": "2.0",
+    "environment": "production",
+    "logging_level": "INFO",
+    "performance_target": "5-10x",
+    "architecture": "ultimate_efficiency",
+    "logger_config": {
+      "enabled": true,
+      "session_name": "vbt_backtesting",
+      "log_level": "INFO"
+    }
+  },
+  "trading": {
+    "symbol": "NIFTY",
+    "exchange": "NSE_INDEX",
+    "timeframe": "5m",
+    "lot_size": 75,
+    "initial_capital": 100000,
+    "commission_per_trade": 40,
+    "slippage_percentage": 0.005
+  },
+  "database": {
+    "path": "data/vAlgo_market_data.db",
+    "type": "duckdb",
+    "required_tables": ["ohlcv_data", "nifty_expired_option_chain"],
+    "validate_on_startup": true
+  },
+  "options": {
+    "strike_type": "ATM", 
+    "default_option_type": "CALL",
+    "expiry_selection": "weekly",
+    "max_positions_per_strategy": 1,
+    "enable_real_money_integration": true,
+    "use_ultra_fast_pnl": true
+  },
+  "backtesting": {
+    "start_date": "2025-06-01",
+    "end_date": "2025-06-30", 
+    "analysis_mode": "options_only",
+    "enable_detailed_logging": true,
+    "use_single_pass_processing": true,
+    "enable_vectorized_state_management": true
+  },
+  "indicators": {
+    "allow_numpy_fallback": true,
+    "require_complete_calculation": true,
+    "rsi": {
+      "enabled": true,
+      "periods": [14, 21],
+      "talib_function": "RSI"
+    },
+    "sma": {
+      "enabled": true,
+      "periods": [9, 20, 50, 200],
+      "talib_function": "SMA"
+    },
+    "ema": {
+      "enabled": false,
+      "periods": [9, 20],
+      "talib_function": "EMA"
+    },
+    "vwap": {
+      "enabled": false,
+      "calculation_method": "standard"
+    },
+    "bollinger_bands": {
+      "enabled": false,
+      "period": 20,
+      "std_dev": 2
+    }
+  },
+  "validation": {
+    "strict_mode": true,
+    "fail_fast": true,
+    "require_all_config_parameters": true
+  },
+  "risk_management": {
+    "max_daily_entries": 3,
+    "forced_exit_time": "15:15",
+    "trading_start_time": "09:20",
+    "trading_end_time": "15:00",
+    "position_size_limit": 5,
+    "max_drawdown_limit": 0.15
+  },
+  "performance": {
+    "enable_smart_indicators": true,
+    "enable_vectorized_state_management": true,
+    "enable_memory_optimization": true,
+    "pre_allocate_arrays": true,
+    "target_processing_speed": 875000,
+    "enable_efficiency_monitoring": true
+  },
+  "special_trading_days": [
+    {
+      "date": "2024-05-18",
+      "reason": "Special equity trading session - options market closed"
+    },
+    {
+      "date": "2024-03-15",
+      "reason": "Holiday makeup trading day - options market closed"
+    },
+    {
+      "date": "2024-12-25",
+      "reason": "Christmas special session - options market closed" 
+    },
+    {
+      "date": "2024-06-04",
+      "reason": "India eletion result day. missing option" 
+    }
+  ],
+  "reports": {
+    "enabled_formats": ["csv"],
+    "include_efficiency_metrics": true,
+    "detailed_trade_log": true,
+    "performance_metrics": {
+      "sharpe_ratio": true,
+      "max_drawdown": true,
+      "win_rate": true,
+      "profit_factor": true,
+      "sortino_ratio": true,
+      "calmar_ratio": true
+    },
+    "case_comparison": true,
+    "export_path": "output/vbt_reports/" 
+  }
+}

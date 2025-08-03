@@ -1,0 +1,38 @@
+# VectorBT Migration Dependencies
+# Core VectorBT framework with full features
+vectorbt[full]>=0.25.0
+
+# Performance dependencies
+numba>=0.56.0
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+
+# Visualization and analytics
+plotly>=5.0.0
+ipywidgets>=7.6.0
+
+# Development and testing
+pytest>=6.0.0
+pytest-benchmark>=3.4.0
+pytest-cov>=3.0.0
+
+# Memory optimization
+psutil>=5.8.0
+
+# Existing vAlgo dependencies (preserved)
+openpyxl
+duckdb
+requests
+websocket-client
+websockets
+matplotlib
+tqdm
+python-dotenv
+xlrd
+ta
+fastapi
+uvicorn
+openalgo
+black
+ruff

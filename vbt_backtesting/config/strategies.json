@@ -1,0 +1,88 @@
+{
+  "TrendFollow": {
+    "status": "Active",
+    "description": "Trend following strategies with moving average analysis",
+    "max_concurrent_cases": 1,
+    "cases": {
+      "sma_basic": {
+        "status": "InActive",
+        "priority": 2,
+        "description": "Basic SMA20 crossover strategy",
+        "entry": "close > ma_20 & close > ma_9",
+        "exit": "close < ma_20",
+        "OptionType": "CALL",
+        "StrikeType": "ATM"
+      },
+      "multi_sma_trend_call": {
+        "status": "Active",
+        "priority": 1,
+        "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
+        "entry": "(close > sma_9) & (sma_9 > sma_20) & (sma_20 > sma_50) & (sma_50 > sma_200)",
+        "exit": "close < sma_20",
+        "OptionType": "CALL",
+        "StrikeType": "ATM",
+        "position_size": "1"
+      },
+      "multi_sma_trend_put": {
+        "status": "Active",
+        "priority": 1,
+        "description": "Multi-SMA trend PUT entry (9<20<50<200), exit on close > SMA20",
+        "entry": "(close < sma_9) & (sma_9 < sma_20) & (sma_20 < sma_50) & (sma_50 < sma_200)",
+        "exit": "close > sma_20",
+        "OptionType": "PUT",
+        "StrikeType": "ATM",
+        "position_size": "1"
+      }
+    }
+  },
+  "Reversal": {
+    "status": "InActive", 
+    "description": "Mean reversion strategies using RSI and moving averages",
+    "max_concurrent_cases": 1,
+    "cases": {
+      "RSI_Bounce_Call": {
+        "status": "Active",
+        "priority": 1,
+        "description": "RSI oversold bounce, call when RSI < 30 and crosses above",
+        "entry": "rsi_14 < 30 & close > ma_20",
+        "exit": "rsi_14 > 45",
+        "OptionType": "CALL",
+        "StrikeType": "ATM"
+      },
+      "RSI_Drop_Put": {
+        "status": "Active",
+        "priority": 1,
+        "description": "RSI overbought drop, put when RSI > 70 and reverses",
+        "entry": "rsi_14 > 70 & close < ma_20",
+        "exit": "rsi_14 < 55",
+        "OptionType": "PUT",
+        "StrikeType": "ATM"
+      }
+    }
+  },
+  "Breakout": {
+    "status": "InActive",
+    "description": "Breakout strategies using VWAP and momentum",
+    "max_concurrent_cases": 1,
+    "cases": {
+      "VWAP_Breakout_Call": {
+        "status": "Active",
+        "priority": 1,
+        "description": "Price breaks above VWAP, with momentum",
+        "entry": "close > vwap & ma_9 > ma_20",
+        "exit": "close < vwap",
+        "OptionType": "CALL",
+        "StrikeType": "ATM"
+      },
+      "VWAP_Breakdown_Put": {
+        "status": "Active",
+        "priority": 1,
+        "description": "Price breaks below VWAP, with weakness",
+        "entry": "close < vwap & ma_9 < ma_20",
+        "exit": "close > vwap",
+        "OptionType": "PUT",
+        "StrikeType": "ATM"
+      }
+    }
+  }
+}
