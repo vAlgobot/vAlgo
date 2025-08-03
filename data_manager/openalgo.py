@@ -368,16 +368,12 @@ class OpenAlgo:
             pd.DataFrame: Historical OHLCV data
         """
         try:
-            # PRODUCTION DEBUG: Validate 5-minute interval
-            if interval != '5m':
-                self.logger.warning(f"[WARNING] Non-standard interval requested: {interval}. Expected: 5m")
-            
-            # PRODUCTION DEBUG: Log the API call parameters
+            # Log the API call parameters with requested interval
             self.logger.info(f"[OPENALGO] API CALL - get_historical_data({symbol}, {exchange}, {interval}, {start_date}, {end_date})")
-            self.logger.info(f"[OPENALGO] Calling client.history() with 5-minute interval")
+            self.logger.info(f"[OPENALGO] Calling client.history() with {interval} interval")
             
-            # Validate interval format for OpenAlgo
-            valid_intervals = ['1m', '5m', '15m', '30m', '1h', '1d']
+            # Validate interval format for OpenAlgo (including 'D' for daily)
+            valid_intervals = ['1m', '5m', '15m', '30m', '1h', '1d', 'D']
             if interval not in valid_intervals:
                 raise ValueError(f"Invalid interval: {interval}. Supported: {valid_intervals}")
             
@@ -386,7 +382,7 @@ class OpenAlgo:
                 self.client.history,
                 symbol=symbol,
                 exchange=exchange,
-                interval=interval,  # This MUST be '5m' for 5-minute candles
+                interval=interval,  # Pass through the requested interval
                 start_date=start_date,
                 end_date=end_date
             )
@@ -412,27 +408,29 @@ class OpenAlgo:
                 
                 # EMERGENCY FIX: If we have sequential integer timestamps, generate proper ones
                 if not formatted_data.empty:
-                    self.logger.info(f"[OPENALGO] Final Result: {len(formatted_data)} 5-minute candles")
+                    self.logger.info(f"[OPENALGO] Final Result: {len(formatted_data)} {interval} candles")
                     self.logger.info(f"[OPENALGO] Final Index Type: {type(formatted_data.index)}")
                     self.logger.info(f"[OPENALGO] Final Timestamp Range: {formatted_data.index[0]} to {formatted_data.index[-1]}")
                     
-                    # Validate 5-minute intervals
-                    if len(formatted_data) > 1:
+                    # Validate intervals (skip for daily candles)
+                    if len(formatted_data) > 1 and interval not in ['D', '1d']:
                         time_diff = (formatted_data.index[1] - formatted_data.index[0]).total_seconds() / 60
-                        self.logger.info(f"[OPENALGO] Interval Validation: {time_diff} minutes between candles (expected: 5)")
-                        if abs(time_diff - 5.0) > 1.0:  # Allow 1-minute tolerance
-                            self.logger.warning(f"[WARNING] Interval mismatch: Got {time_diff} minutes, expected 5 minutes")
+                        expected_minutes = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60}.get(interval, 0)
+                        if expected_minutes > 0:
+                            self.logger.info(f"[OPENALGO] Interval Validation: {time_diff} minutes between candles (expected: {expected_minutes})")
+                            if abs(time_diff - expected_minutes) > 1.0:  # Allow 1-minute tolerance
+                                self.logger.warning(f"[WARNING] Interval mismatch: Got {time_diff} minutes, expected {expected_minutes} minutes")
                     
                     # Check if the index contains sequential integers (0, 1, 2, 3...)
                     if (formatted_data.index.dtype == 'datetime64[ns]' and 
                         len(formatted_data) > 1 and
                         formatted_data.index[0].year == 1970):  # Epoch timestamps detected
                         
-                        self.logger.warning(f"[TIMESTAMP_FIX] Detected epoch timestamps, generating proper 5-minute timestamps")
+                        self.logger.warning(f"[TIMESTAMP_FIX] Detected epoch timestamps, generating proper {interval} timestamps")
                         
                         # Generate proper timestamps based on date range and interval
                         fixed_data = self._fix_timestamp_index(formatted_data, start_date, end_date, interval)
-                        self.logger.info(f"[TIMESTAMP_FIX] Generated 5-minute timestamps: {fixed_data.index[:3].tolist()} to {fixed_data.index[-3:].tolist()}")
+                        self.logger.info(f"[TIMESTAMP_FIX] Generated {interval} timestamps: {fixed_data.index[:3].tolist()} to {fixed_data.index[-3:].tolist()}")
                         return fixed_data
                 
                 return formatted_data

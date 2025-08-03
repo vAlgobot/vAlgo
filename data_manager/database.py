@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import time
+import threading
 
 try:
     import duckdb
@@ -29,7 +30,6 @@ except ImportError:
     raise ImportError("DuckDB library not installed. Run: pip install duckdb")
 
 from utils.logger import get_logger
-from utils.config_loader import ConfigLoader
 
 
 class DatabaseManager:
@@ -38,16 +38,34 @@ class DatabaseManager:
     
     Uses DuckDB for high-performance analytical queries suitable for backtesting
     and market data analysis.
+    
+    Singleton pattern implementation to prevent multiple database connections.
     """
+    
+    _instance = None
+    _lock = threading.Lock()
+    _initialized = False
+    
+    def __new__(cls, db_path: Optional[str] = None, config_path: Optional[str] = None):
+        """Ensure singleton pattern with thread safety."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(DatabaseManager, cls).__new__(cls)
+        return cls._instance
     
     def __init__(self, db_path: Optional[str] = None, config_path: Optional[str] = None):
         """
-        Initialize Database Manager.
+        Initialize Database Manager (singleton pattern).
         
         Args:
             db_path: Path to DuckDB database file
             config_path: Path to Excel configuration file
         """
+        # Only initialize once due to singleton pattern
+        if self._initialized:
+            return
+            
         self.logger = get_logger(__name__)
         self.config_path = config_path or "config/config.xlsx"
         
@@ -68,7 +86,8 @@ class DatabaseManager:
         # Initialize database
         self._initialize_database()
         
-        self.logger.info(f"DatabaseManager initialized with database: {self.db_path}")
+        self.logger.info(f"DatabaseManager singleton initialized with database: {self.db_path}")
+        DatabaseManager._initialized = True
     
     def _initialize_database(self) -> None:
         """Initialize database connection and create tables if they don't exist."""
@@ -697,7 +716,13 @@ class DatabaseManager:
             
             if end_date:
                 where_conditions.append("timestamp <= ?")
-                params.append(end_date)
+                # Fix: For same-day queries or single day backtesting, extend end_date to include full day
+                if end_date and len(end_date) == 10:  # YYYY-MM-DD format
+                    end_date_extended = end_date + ' 23:59:59'
+                    params.append(end_date_extended)
+                    self.logger.debug(f"Extended end_date for full day coverage: {end_date_extended}")
+                else:
+                    params.append(end_date)
             
             query = f"""
             SELECT timestamp, open, high, low, close, volume
@@ -724,6 +749,152 @@ class DatabaseManager:
             self.logger.error(f"Failed to retrieve data for {symbol}: {e}")
             return pd.DataFrame()
     
+    def get_available_dates(self, symbol: Optional[str] = None, exchange: Optional[str] = None, 
+                           timeframe: Optional[str] = None) -> List[str]:
+        """
+        Get distinct trading dates from OHLC data.
+        
+        Args:
+            symbol: Filter by specific symbol (optional)
+            exchange: Filter by specific exchange (optional)
+            timeframe: Filter by specific timeframe (optional)
+            
+        Returns:
+            List of distinct dates in YYYY-MM-DD format
+        """
+        try:
+            # Build query conditions
+            where_conditions = []
+            params = []
+            
+            if symbol:
+                where_conditions.append("symbol = ?")
+                params.append(symbol.upper())
+            
+            if exchange:
+                where_conditions.append("exchange = ?")
+                params.append(exchange.upper())
+            
+            if timeframe:
+                where_conditions.append("timeframe = ?")
+                params.append(timeframe.lower())
+            
+            # Build the query
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            query = f"""
+            SELECT DISTINCT DATE(timestamp) as date_only
+            FROM {self.table_name}
+            WHERE {where_clause}
+            ORDER BY date_only
+            """
+            
+            result = self.connection.execute(query, params).fetchall()
+            dates = [str(row[0]) for row in result]
+            
+            filter_desc = f" (filtered by {', '.join(f'{k}={v}' for k, v in zip(['symbol', 'exchange', 'timeframe'], [symbol, exchange, timeframe]) if v)})" if any([symbol, exchange, timeframe]) else ""
+            self.logger.info(f"Retrieved {len(dates)} distinct trading dates from OHLC data{filter_desc}")
+            
+            return dates
+            
+        except Exception as e:
+            self.logger.error(f"Error getting available dates: {e}")
+            return []
+    
+    def get_ohlc_date_coverage_stats(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get comprehensive date coverage statistics for OHLC data.
+        
+        Args:
+            symbol: Filter by specific symbol (optional)
+            
+        Returns:
+            Dictionary with date coverage analysis
+        """
+        try:
+            # Get all available dates
+            all_dates = self.get_available_dates(symbol=symbol)
+            
+            # Analyze date gaps
+            date_gaps = self._analyze_ohlc_date_gaps(all_dates)
+            
+            # Get symbols and their coverage
+            if symbol:
+                symbol_filter = "WHERE symbol = ?"
+                params = [symbol.upper()]
+            else:
+                symbol_filter = ""
+                params = []
+                
+            # Records per date analysis
+            records_per_date = self.connection.execute(f"""
+                SELECT DATE(timestamp) as date_only, COUNT(*) as record_count
+                FROM {self.table_name}
+                {symbol_filter}
+                GROUP BY DATE(timestamp)
+                ORDER BY record_count DESC
+            """, params).fetchall()
+            
+            # Symbol coverage analysis
+            symbols_per_date = self.connection.execute(f"""
+                SELECT DATE(timestamp) as date_only, COUNT(DISTINCT symbol) as symbol_count
+                FROM {self.table_name}
+                {symbol_filter}
+                GROUP BY DATE(timestamp)
+                ORDER BY symbol_count DESC
+            """, params).fetchall()
+            
+            return {
+                "trading_dates": {
+                    "total_dates": len(all_dates),
+                    "start_date": all_dates[0] if all_dates else None,
+                    "end_date": all_dates[-1] if all_dates else None,
+                    "date_gaps": date_gaps
+                },
+                "data_density": {
+                    "max_records_per_day": records_per_date[0] if records_per_date else None,
+                    "min_records_per_day": records_per_date[-1] if records_per_date else None,
+                    "avg_records_per_day": sum(r[1] for r in records_per_date) / len(records_per_date) if records_per_date else 0
+                },
+                "symbol_coverage": {
+                    "max_symbols_per_day": symbols_per_date[0] if symbols_per_date else None,
+                    "min_symbols_per_day": symbols_per_date[-1] if symbols_per_date else None,
+                    "avg_symbols_per_day": sum(r[1] for r in symbols_per_date) / len(symbols_per_date) if symbols_per_date else 0
+                },
+                "filter_applied": {"symbol": symbol} if symbol else None
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting OHLC date coverage stats: {e}")
+            return {"error": str(e)}
+    
+    def _analyze_ohlc_date_gaps(self, dates: List[str]) -> List[Dict[str, Any]]:
+        """Analyze gaps in OHLC date sequence."""
+        try:
+            from datetime import datetime, timedelta
+            
+            if len(dates) < 2:
+                return []
+            
+            gaps = []
+            for i in range(1, len(dates)):
+                prev_date = datetime.strptime(dates[i-1], '%Y-%m-%d')
+                curr_date = datetime.strptime(dates[i], '%Y-%m-%d')
+                
+                # Check for gaps (more than 1 day for weekdays, more than 3 days for weekends)
+                diff = (curr_date - prev_date).days
+                if diff > 3:  # Likely a gap (considering weekends)
+                    gaps.append({
+                        "gap_start": dates[i-1],
+                        "gap_end": dates[i],
+                        "days_missing": diff - 1
+                    })
+            
+            return gaps
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing OHLC date gaps: {e}")
+            return []
+
     def get_multiple_instruments_data(self, instruments: List[Dict[str, str]],
                                     start_date: Optional[str] = None, 
                                     end_date: Optional[str] = None) -> Dict[str, pd.DataFrame]:
@@ -755,7 +926,7 @@ class DatabaseManager:
         self.logger.info(f"Successfully retrieved data for {len(results)} instruments")
         return results
     
-    def get_backtest_data_from_config(self, config_path: Optional[str] = None) -> Dict[str, pd.DataFrame]:
+    ###def get_backtest_data_from_config(self, config_path: Optional[str] = None) -> Dict[str, pd.DataFrame]:
         """
         Get data for all active instruments using config dates (for backtesting).
         
@@ -1007,3 +1178,42 @@ class DatabaseManager:
         return (f"DatabaseManager(db_path={self.db_path}, "
                 f"records={stats.get('total_records', 0)}, "
                 f"symbols={stats.get('unique_symbols', 0)})")
+    
+    @classmethod
+    def reset_instance(cls):
+        """Reset singleton instance (primarily for testing)."""
+        with cls._lock:
+            if cls._instance is not None:
+                try:
+                    cls._instance.close()
+                except:
+                    pass
+            cls._instance = None
+            cls._initialized = False
+
+
+# Convenience functions for easy access
+def get_database_manager(db_path: Optional[str] = None, config_path: Optional[str] = None) -> DatabaseManager:
+    """Get the singleton database manager instance."""
+    return DatabaseManager(db_path, config_path)
+
+
+def get_quick_data(symbol: str, timeframe: str = '5m', days: int = 30) -> pd.DataFrame:
+    """Quick data retrieval for common use cases."""
+    from datetime import datetime, timedelta
+    
+    db_manager = get_database_manager()
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    
+    return db_manager.get_ohlcv_data(
+        symbol=symbol,
+        exchange='NSE_INDEX',
+        timeframe=timeframe,
+        start_date=start_date.strftime('%Y-%m-%d'),
+        end_date=end_date.strftime('%Y-%m-%d')
+    )
+
+
+# Global instance for backward compatibility
+database_manager = get_database_manager()

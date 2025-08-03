@@ -69,9 +69,32 @@ class MarketDataFetcher:
     """
     
     def __init__(self, db_path: str = "data/valgo_market_data.db", 
-                 openalgo_url: str = "http://localhost:5000"):
+                 openalgo_url: str = None, mode: str = "backtesting"):
         self.db_path = db_path
-        self.openalgo_url = openalgo_url
+        
+        # Load OpenAlgo configuration from environment variables
+        try:
+            from utils.env_loader import get_all_config
+            env_config = get_all_config()
+            
+            self.openalgo_url = openalgo_url or env_config.get('openalgo_url', 'http://localhost:5000')
+            self.openalgo_api_key = env_config.get('openalgo_api_key')
+            
+            # Remove trailing slash if present
+            if self.openalgo_url.endswith('/'):
+                self.openalgo_url = self.openalgo_url.rstrip('/')
+                
+        except Exception as e:
+            # Fallback to direct os.environ access
+            import os
+            self.openalgo_url = openalgo_url or os.getenv('OPENALGO_URL', 'http://localhost:5000')
+            self.openalgo_api_key = os.getenv('OPENALGO_API_KEY')
+            
+            # Remove trailing slash if present
+            if self.openalgo_url.endswith('/'):
+                self.openalgo_url = self.openalgo_url.rstrip('/')
+                
+            print(f"[FALLBACK] Using environment variables directly - URL: {self.openalgo_url}")
         
         try:
             self.logger = get_logger(__name__)
@@ -84,31 +107,41 @@ class MarketDataFetcher:
                 self.logger.addHandler(handler)
                 self.logger.setLevel(logging.INFO)
         
-        # Initialize data sources (PRODUCTION: NO MOCK DATA)
+        # Initialize data sources based on mode
+        self.mode = mode
         self.openalgo_client = None
-        self.data_sources = ['openalgo', 'database']  # Removed yahoo and mock for production
+        
+        # LIVE MODE: Only OpenAlgo (no fallbacks to prevent mock data)
+        # BACKTESTING MODE: OpenAlgo + Database fallback
+        if mode == "live":
+            self.data_sources = ['openalgo']  # NO DATABASE FALLBACK in live mode
+        else:
+            self.data_sources = ['openalgo', 'database']  # Allow database for backtesting
+            
         self.last_successful_source = None
         self.cache = {}
         self.cache_timeout = 30  # 30 seconds cache
         
         self._initialize_openalgo()
-        self.logger.info("[DATA] MarketDataFetcher initialized with multiple sources")
+        self.logger.info(f"[DATA] MarketDataFetcher initialized in {mode} mode with sources: {self.data_sources}")
     
     def _initialize_openalgo(self):
         """Initialize OpenAlgo client if available."""
         try:
             if UTILS_AVAILABLE:
-                self.openalgo_client = OpenAlgo(base_url=self.openalgo_url)
-                # Test connection
-                if self.openalgo_client.test_connection():
-                    self.logger.info("[OK] OpenAlgo client connected successfully")
+                # Use correct OpenAlgo constructor parameters
+                self.openalgo_client = OpenAlgo(host=self.openalgo_url, api_key=self.openalgo_api_key)
+                # Test connection using connect() method
+                if self.openalgo_client.connect():
+                    self.logger.info(f"[OK] OpenAlgo client connected successfully to {self.openalgo_url}")
                 else:
-                    self.logger.warning("[WARNING] OpenAlgo client connection failed")
+                    self.logger.warning(f"[WARNING] OpenAlgo client connection failed to {self.openalgo_url}")
                     self.openalgo_client = None
             else:
                 self.logger.warning("[WARNING] OpenAlgo components not available")
         except Exception as e:
             self.logger.warning(f"OpenAlgo initialization failed: {e}")
+            self.logger.warning(f"Attempted URL: {self.openalgo_url}, API Key: {'***masked***' if self.openalgo_api_key else 'None'}")
             self.openalgo_client = None
     
     def fetch_real_time_data(self, symbol: str, timeframe: str = "5m") -> Dict[str, Any]:
@@ -122,6 +155,11 @@ class MarketDataFetcher:
         Returns:
             Dictionary with OHLCV data or empty dict if all sources fail
         """
+        # LIVE MODE: Fail fast if OpenAlgo not available
+        if self.mode == "live" and not self.openalgo_client:
+            error_msg = f"[CRITICAL] Live trading requires OpenAlgo connection for {symbol} - no fallbacks available"
+            self.logger.error(error_msg)
+            raise Exception(error_msg)
         cache_key = f"{symbol}_{timeframe}"
         
         # Check cache first
@@ -145,9 +183,15 @@ class MarketDataFetcher:
                 continue
         
         # All sources failed - CRITICAL ERROR
-        self.logger.error(f"[CRITICAL] All real data sources failed for {symbol}. Available sources: {self.data_sources}")
-        self.logger.error(f"[CRITICAL] System will NOT provide mock data. Fix data source issues.")
-        return {}
+        if self.mode == "live":
+            error_msg = f"[CRITICAL] Live trading data source failed for {symbol}. OpenAlgo connection lost or broker disconnected."
+            self.logger.error(error_msg)
+            self.logger.error("[CRITICAL] Live trading cannot continue without real market data - stopping execution")
+            raise Exception(f"Live trading data failure for {symbol} - OpenAlgo connection required")
+        else:
+            self.logger.error(f"[CRITICAL] All real data sources failed for {symbol}. Available sources: {self.data_sources}")
+            self.logger.error(f"[CRITICAL] System will NOT provide mock data. Fix data source issues.")
+            return {}
     
     def _fetch_from_source(self, symbol: str, timeframe: str, source: str) -> Dict[str, Any]:
         """Fetch data from specific source (PRODUCTION: Only real data sources)."""
@@ -173,27 +217,85 @@ class MarketDataFetcher:
             
             self.logger.info(f"[OPENALGO] Fetching {symbol} from {exchange} with timeframe {timeframe}")
             
-            # PRIMARY: Use OpenAlgo's real-time quote endpoint
-            quote_response = self.openalgo_client.get_quotes(symbol, exchange)
+            # ENHANCED STRATEGY: Try multiple approaches for real-time data
+            
+            # Strategy 1: Use recent historical data (most reliable for live candles)
+            self.logger.info(f"[OPENALGO] Trying historical endpoint for latest {symbol} candle")
+            try:
+                from datetime import timedelta
+                current_time = datetime.now()
+                # Get last 10 minutes of data to capture latest candle
+                start_time = current_time - timedelta(minutes=10)
+                end_date = current_time.strftime('%Y-%m-%d')
+                start_date = start_time.strftime('%Y-%m-%d')
+                
+                recent_data = self.openalgo_client.get_historical_data(
+                    symbol=symbol,
+                    exchange='NSE_INDEX',
+                    interval=timeframe,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                if recent_data is not None and not recent_data.empty:
+                    # Get the latest candle
+                    latest_candle = recent_data.iloc[-1]
+                    latest_timestamp = recent_data.index[-1]
+                    
+                    ohlcv_data = {
+                        'timestamp': latest_timestamp,
+                        'open': float(latest_candle['open']),
+                        'high': float(latest_candle['high']),
+                        'low': float(latest_candle['low']),
+                        'close': float(latest_candle['close']),
+                        'volume': int(latest_candle['volume']),
+                        'source': 'openalgo_historical'
+                    }
+                    
+                    self.logger.info(f"[OPENALGO] Latest candle: O:{ohlcv_data['open']:.2f} H:{ohlcv_data['high']:.2f} L:{ohlcv_data['low']:.2f} C:{ohlcv_data['close']:.2f} V:{ohlcv_data['volume']}")
+                    
+                    # Validate the data is not all zeros
+                    if all(ohlcv_data[key] == 0.0 for key in ['open', 'high', 'low', 'close']):
+                        self.logger.warning(f"[OPENALGO] Historical data contains zero values - trying quotes endpoint")
+                    else:
+                        return ohlcv_data
+                        
+            except Exception as e:
+                self.logger.warning(f"[OPENALGO] Historical data fetch failed: {e}")
+            
+            # Strategy 2: Fallback to quotes endpoint
+            self.logger.info(f"[OPENALGO] Trying quotes endpoint for {symbol}")
+            quote_response = self.openalgo_client.get_quotes(symbol, 'NSE_INDEX')
             self.logger.info(f"[OPENALGO] Quote API response status: {quote_response.get('status') if quote_response else 'None'}")
             
             if quote_response and quote_response.get('status') == 'success':
                 quote_data = quote_response.get('data')
                 if quote_data:
-                    # Convert OpenAlgo quote to OHLCV format
-                    current_price = float(quote_data.get('ltp', 0))  # Last traded price
+                    # Extract price data - check multiple possible field names
+                    current_price = float(quote_data.get('ltp', quote_data.get('close', quote_data.get('c', 0))))
+                    open_price = float(quote_data.get('open', quote_data.get('o', current_price)))
+                    high_price = float(quote_data.get('high', quote_data.get('h', current_price)))
+                    low_price = float(quote_data.get('low', quote_data.get('l', current_price)))
+                    volume = int(quote_data.get('volume', quote_data.get('v', 0)))
                     
                     ohlcv_data = {
                         'timestamp': datetime.now(),
-                        'open': float(quote_data.get('open', current_price)),
-                        'high': float(quote_data.get('high', current_price)), 
-                        'low': float(quote_data.get('low', current_price)),
+                        'open': open_price,
+                        'high': high_price,
+                        'low': low_price,
                         'close': current_price,
-                        'volume': int(quote_data.get('volume', 0)),
+                        'volume': volume,
                         'source': 'openalgo_quotes'
                     }
                     
+                    # Log the extracted data for debugging
                     self.logger.info(f"[OPENALGO] Quote data: O:{ohlcv_data['open']:.2f} H:{ohlcv_data['high']:.2f} L:{ohlcv_data['low']:.2f} C:{ohlcv_data['close']:.2f} V:{ohlcv_data['volume']}")
+                    
+                    # Validate the data is meaningful
+                    if all(ohlcv_data[key] == 0.0 for key in ['open', 'high', 'low', 'close']):
+                        self.logger.error(f"[OPENALGO] Quote API returning zero values - broker may not be connected")
+                        return {}
+                    
                     return ohlcv_data
             
             # SECONDARY: Try historical data endpoint for latest 5-minute candle

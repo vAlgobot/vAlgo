@@ -20,14 +20,27 @@ Created: June 28, 2025
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Tuple, Union, cast
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 import datetime
+import sys
+from pathlib import Path
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 try:
     import duckdb
     DUCKDB_AVAILABLE = True
 except ImportError:
     DUCKDB_AVAILABLE = False
+
+try:
+    from utils.smart_data_manager import SmartDataManager
+    SMART_DATA_AVAILABLE = True
+except ImportError:
+    SMART_DATA_AVAILABLE = False
 
 
 class CPR:
@@ -39,7 +52,8 @@ class CPR:
     """
     
     def __init__(self, timeframe: str = 'daily', use_daily_candles: bool = True, 
-                 db_path: str = "data/valgo_market_data.db", optimize_performance: bool = True):
+                 db_path: str = "data/valgo_market_data.db", optimize_performance: bool = True,
+                 live_mode: bool = False, market_data_fetcher=None):
         """
         Initialize CPR calculator.
         
@@ -48,10 +62,24 @@ class CPR:
             use_daily_candles: If True, fetch pure daily candles from database for higher accuracy
             db_path: Path to DuckDB database containing daily candle data
             optimize_performance: If True, calculate CPR once per day and cache results
+            live_mode: If True, enable enhanced CPR fallback for live trading
+            market_data_fetcher: Market data fetcher for enhanced CPR API fallback
         """
         self.timeframe = timeframe.lower()
         self.use_daily_candles = use_daily_candles and DUCKDB_AVAILABLE
         self.db_path = db_path
+        self.live_mode = live_mode
+        self.market_data_fetcher = market_data_fetcher
+        self.smart_data_manager = None
+        
+        # Initialize smart data manager for enhanced CPR if available
+        if SMART_DATA_AVAILABLE and live_mode:
+            try:
+                self.smart_data_manager = SmartDataManager()
+                if market_data_fetcher:
+                    self.smart_data_manager.market_data_fetcher = market_data_fetcher
+            except Exception:
+                pass  # Fallback to regular CPR if smart data manager fails
         self.optimize_performance = optimize_performance
         self.valid_timeframes = ['daily', 'weekly', 'monthly']
         
@@ -463,23 +491,57 @@ class CPR:
         """
         Calculate daily CPR using pure daily candles from database for maximum accuracy.
         This addresses the user's suggestion for higher accuracy CPR calculation.
+        OPTIMIZED: Only calculate for unique dates in the data to avoid processing warm-up data.
+        TRADING DAY ONLY: Filter data to trading day only to avoid processing entire warm-up period.
         """
         try:
-            # Get date range from input data
-            start_date = df['timestamp'].min().strftime('%Y-%m-%d')
-            end_date = df['timestamp'].max().strftime('%Y-%m-%d')
+            # Get unique dates from input data for optimization
+            unique_dates = sorted(df['timestamp'].dt.date.unique())
+            if not unique_dates:
+                return df
             
-            # Extend start date to get previous day data for CPR calculation
-            extended_start = (df['timestamp'].min() - timedelta(days=10)).strftime('%Y-%m-%d')
+            # CRITICAL FIX: Only get the actual trading day (last date) for CPR calculation
+            # This prevents processing the entire warm-up period (20,432 records)
+            trading_day = unique_dates[-1]  # Get the actual trading day
             
-            # Fetch pure daily candles from database
+            # Filter input data to trading day only for CPR calculation
+            trading_day_mask = df['timestamp'].dt.date == trading_day
+            trading_day_df = df[trading_day_mask].copy()
+            
+            print(f"[CPR_OPTIMIZATION] Processing only trading day: {trading_day}")
+            print(f"[CPR_OPTIMIZATION] Filtered data: {len(trading_day_df)} records vs {len(df)} total records")
+            
+            # For backtesting optimization: only get data for the trading day + 10 days buffer
+            start_date = trading_day.strftime('%Y-%m-%d')
+            end_date = trading_day.strftime('%Y-%m-%d')
+            
+            # Extend start date to get previous day data for CPR calculation (only 10 days buffer)
+            extended_start = (trading_day - timedelta(days=10)).strftime('%Y-%m-%d')
+            
+            # Fetch pure daily candles from database (optimized range)
             daily_df = self._fetch_daily_candles_from_db(symbol, extended_start, end_date)
             
             if daily_df.empty:
-                print("Warning: No daily candles found, falling back to aggregation method")
+                print("Warning: No daily candles found in database")
+                
+                # Try enhanced CPR fallback for live mode
+                if self.live_mode:
+                    print("[ENHANCED_CPR] Attempting enhanced CPR fallback using API...")
+                    enhanced_cpr_data = self._enhanced_cpr_fallback(symbol)
+                    if enhanced_cpr_data:
+                        print("[ENHANCED_CPR] ✅ Enhanced CPR fallback successful")
+                        # Apply enhanced CPR levels to all rows
+                        for level, value in enhanced_cpr_data.items():
+                            df[level] = value
+                        return df
+                    else:
+                        print("[ENHANCED_CPR] ❌ Enhanced CPR fallback failed")
+                
+                print("Falling back to aggregation method")
                 return self._calculate_daily_cpr(df)
             
             print(f"Using {len(daily_df)} daily candles for high-accuracy CPR calculation")
+            print(f"[OPTIMIZATION] CPR calculation optimized for {len(unique_dates)} unique dates vs {len(df)} total records")
             
             # Calculate previous day OHLC for each date
             daily_df['prev_high'] = daily_df['high'].shift(1)
@@ -489,7 +551,7 @@ class CPR:
             # Calculate CPR levels for each day
             daily_df = self._calculate_cpr_levels(daily_df, 'prev_high', 'prev_low', 'prev_close')
             
-            # Map CPR levels back to intraday data
+            # Map CPR levels back to intraday data - ONLY FOR TRADING DAY
             df['date'] = df['timestamp'].dt.date
             cpr_levels = ['CPR_Previous_day_high', 'CPR_Previous_day_low', 'CPR_Previous_day_close',
                          'CPR_Pivot', 'CPR_TC', 'CPR_BC', 'CPR_R1', 'CPR_R2', 'CPR_R3', 'CPR_R4',
@@ -500,7 +562,8 @@ class CPR:
             for level in cpr_levels:
                 df[level] = np.nan
             
-            # Map daily CPR values to all intraday candles of that day
+            # CRITICAL FIX: Only map CPR values to the trading day, not the entire warm-up period
+            # Map daily CPR values only to trading day intraday candles
             for date_idx, daily_row in daily_df.iterrows():
                 if isinstance(date_idx, datetime.datetime):
                     date_key = date_idx.date()
@@ -509,13 +572,19 @@ class CPR:
                 else:
                     date_key = datetime.datetime.strptime(str(date_idx), '%Y-%m-%d').date()
                 
-                # Map each CPR level to the intraday data
+                # Only process the trading day, skip warm-up data
+                if date_key != trading_day:
+                    continue
+                
+                # Map each CPR level to the intraday data for trading day only
                 for level in cpr_levels:
                     if level in daily_row.index:
                         value = daily_row[level]
                         rows = df.index[df['date'] == date_key]
                         if not pd.isna(value) and len(rows) > 0:
                             df.loc[rows, level] = value
+            
+            print(f"[CPR_OPTIMIZATION] CPR levels mapped only to trading day: {trading_day}")
             
             # Clean up temporary columns
             df = df.drop(['date'], axis=1)
@@ -569,6 +638,81 @@ class CPR:
         """String representation of CPR indicator."""
         return f"CPR(timeframe='{self.timeframe}')"
     
+    def _enhanced_cpr_fallback(self, symbol: str) -> Optional[Dict]:
+        """
+        Enhanced CPR fallback using API when previous day data is missing from database.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Dict with CPR levels or None if failed
+        """
+        if not self.live_mode or not self.smart_data_manager:
+            return None
+            
+        try:
+            # Get previous trading day data using smart data manager
+            today = datetime.now().date()
+            previous_day_data = self.smart_data_manager.get_previous_day_data(
+                symbol=symbol,
+                exchange='NSE_INDEX',
+                timeframe='D',
+                reference_date=today
+            )
+            
+            if previous_day_data is not None and not previous_day_data.empty:
+                # Extract OHLC from previous day data
+                if len(previous_day_data) == 1:
+                    prev_open = float(previous_day_data['open'].iloc[0])
+                    prev_high = float(previous_day_data['high'].iloc[0])
+                    prev_low = float(previous_day_data['low'].iloc[0])
+                    prev_close = float(previous_day_data['close'].iloc[0])
+                else:
+                    # Multiple candles - aggregate
+                    prev_open = float(previous_day_data['open'].iloc[0])
+                    prev_high = float(previous_day_data['high'].max())
+                    prev_low = float(previous_day_data['low'].min())
+                    prev_close = float(previous_day_data['close'].iloc[-1])
+                
+                # Calculate enhanced CPR levels using industry-standard formulas
+                pivot = (prev_high + prev_low + prev_close) / 3
+                tc = (prev_high + prev_low) / 2  # Top Central (TC) = (H + L) / 2
+                bc = 2 * pivot - tc  # Bottom Central (BC) = 2 * Pivot - TC
+                
+                # Enhanced support/resistance levels (R4/S4 included)
+                r1 = 2 * pivot - prev_low
+                r2 = pivot + (prev_high - prev_low)
+                r3 = prev_high + (2 * (pivot - prev_low))
+                r4 = r3 + (r2 - r1)  # Enhanced R4 level
+                
+                s1 = 2 * pivot - prev_high
+                s2 = pivot - (prev_high - prev_low)
+                s3 = prev_low - (2 * (prev_high - pivot))
+                s4 = s3 - (r2 - r1)  # Enhanced S4 level
+                
+                return {
+                    'CPR_Previous_day_high': prev_high,
+                    'CPR_Previous_day_low': prev_low,
+                    'CPR_Previous_day_close': prev_close,
+                    'CPR_Pivot': pivot,
+                    'CPR_TC': tc,
+                    'CPR_BC': bc,
+                    'CPR_R1': r1,
+                    'CPR_R2': r2,
+                    'CPR_R3': r3,
+                    'CPR_R4': r4,
+                    'CPR_S1': s1,
+                    'CPR_S2': s2,
+                    'CPR_S3': s3,
+                    'CPR_S4': s4
+                }
+                
+        except Exception as e:
+            print(f"[ENHANCED_CPR] ❌ Enhanced CPR fallback failed: {e}")
+            
+        return None
+
     def __repr__(self) -> str:
         """Detailed representation of CPR indicator."""
         return f"CPR(timeframe='{self.timeframe}', levels={len(self.get_level_names())})"

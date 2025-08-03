@@ -210,7 +210,11 @@ class ConfigLoader:
                     value = row.get('Value', '')
                     
                     if param:
-                        config[param] = value
+                        # Special handling for date parameters to support user-friendly dd-MM-yyyy format
+                        if param in ['start_date', 'end_date']:
+                            config[param] = self._parse_user_friendly_date(value)
+                        else:
+                            config[param] = value
                 except Exception as e:
                     self.logger.warning(f"Error processing initialize row: {e}")
             
@@ -265,6 +269,17 @@ class ConfigLoader:
         except (ValueError, TypeError):
             self.logger.warning(f"Invalid capital value: {capital}, using default 100000")
             return 100000.0
+    
+    def get_daily_entry_limit(self) -> int:
+        """Get daily entry limit"""
+        init_config = self.get_initialize_config()
+        daily_limit = init_config.get('daily_entry_limit', 1)
+        
+        try:
+            return int(daily_limit)
+        except (ValueError, TypeError):
+            self.logger.warning(f"Invalid daily entry limit value: {daily_limit}, using default 1")
+            return 1
     
     def get_active_brokers(self) -> List[Dict[str, Any]]:
         """
@@ -344,6 +359,91 @@ class ConfigLoader:
         
         self.logger.info(f"Found {len(active_instruments)} active instruments")
         return active_instruments
+    
+    def get_instrument_timeframe(self, symbol: str) -> str:
+        """Get timeframe for specific symbol from Instruments sheet"""
+        instruments = self.get_active_instruments()
+        for instrument in instruments:
+            if instrument.get('symbol') == symbol:
+                return instrument.get('timeframe', '5min')
+        return '5min'
+    
+    def get_indicator_key_generate(self) -> bool:
+        """Get Indicator_Key_Generate flag from Initialize sheet"""
+        init_config = self.get_initialize_config()
+        flag_value = init_config.get('indicator_key_generate', 'false')
+        return str(flag_value).lower().strip() == 'true'
+    
+    def update_rule_types_sheet(self, discovered_indicators: List[Dict[str, Any]]) -> bool:
+        """
+        Update Rule_Types sheet with discovered indicators
+        
+        Args:
+            discovered_indicators: List of discovered indicator dictionaries
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not discovered_indicators:
+                self.logger.warning("No indicators to update in Rule_Types sheet")
+                return False
+            
+            # Read current Rule_Types sheet
+            if not self._ensure_loaded():
+                return False
+                
+            if 'rule_types' not in self.config_data:
+                self.logger.error("Rule_Types sheet not found in config")
+                return False
+            
+            current_df = self.config_data['rule_types']
+            
+            # Get existing indicators to avoid duplicates
+            existing_indicators = set()
+            if 'Indicators' in current_df.columns:
+                existing_indicators = set(current_df['Indicators'].dropna().astype(str))
+            
+            # Prepare new indicators data
+            new_indicators = []
+            for indicator in discovered_indicators:
+                indicator_name = indicator.get('name', '')
+                if indicator_name and indicator_name not in existing_indicators:
+                    new_indicators.append({
+                        'Indicators': indicator_name,
+                        'Status': 'available',
+                        'Description': indicator.get('description', f'Auto-discovered: {indicator_name}')
+                       
+                    })
+            
+            if not new_indicators:
+                self.logger.info("Rule_Types sheet is already up-to-date - no new indicators needed")
+                return True
+            
+            # Create DataFrame for new indicators
+            new_df = pd.DataFrame(new_indicators)
+            
+            # Combine with existing data
+            updated_df = pd.concat([current_df, new_df], ignore_index=True)
+            
+            # Write back to Excel file
+            try:
+                with pd.ExcelWriter(self.config_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+                    updated_df.to_excel(writer, sheet_name='Rule_Types', index=False)
+                
+                # Update in-memory config data
+                self.config_data['rule_types'] = updated_df
+                
+                self.logger.info(f"Successfully added {len(new_indicators)} new indicators to Rule_Types sheet")
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"Error writing to Excel file: {e}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error updating Rule_Types sheet: {e}")
+            return False
     
     def get_primary_broker_openalgo_config(self) -> Dict[str, str]:
         """
@@ -617,10 +717,10 @@ class ConfigLoader:
     
     def get_exit_conditions_enhanced(self) -> Dict[str, Any]:
         """
-        Get exit conditions with multiple row support
+        Get exit conditions with multiple row support, Condition_Order and Logic operators
         
         Returns:
-            Dictionary with parsed exit rules
+            Dictionary with parsed exit rules (matching entry conditions structure)
         """
         if not self._ensure_loaded():
             self.logger.warning("Config not loaded, returning empty exit conditions")
@@ -645,26 +745,86 @@ class ConfigLoader:
                 if pd.isna(rule_name):
                     continue
                     
-                exit_type = rule_group['Exit_Type_Filled'].iloc[0]
-                status = rule_group['Status_Filled'].iloc[0]
+                # Get rule status from first non-null status
+                rule_status = rule_group['Status_Filled'].iloc[0]
+                if pd.isna(rule_status):
+                    rule_status = 'Inactive'
                 
-                conditions = []
-                for _, row in rule_group.iterrows():
-                    indicator = row.get('Indicator', '')
-                    operator = row.get('Operator', '')
-                    value = row.get('Value', '')
-                    
-                    if pd.notna(indicator) and pd.notna(operator) and pd.notna(value):
-                        conditions.append({
-                            'indicator': str(indicator),
-                            'operator': str(operator),
-                            'value': str(value)
-                        })
+                # Process conditions by Condition_Order (like entry conditions)
+                condition_groups = []
+                
+                if 'Condition_Order' in rule_group.columns:
+                    # Group by Condition_Order for OR/AND logic support
+                    for order, order_group in rule_group.groupby('Condition_Order'):
+                        if pd.isna(order):
+                            continue
+                            
+                        conditions = []
+                        logic_ops = []
+                        exit_types = []
+                        
+                        for _, row in order_group.iterrows():
+                            # Extract condition components
+                            indicator = row.get('Indicator', '')
+                            operator = row.get('Operator', '')
+                            value = row.get('Value', '')
+                            logic = row.get('Logic', '')
+                            exit_type = row.get('Exit_Type_Filled', 'Signal')
+                            
+                            if pd.notna(indicator) and pd.notna(operator) and pd.notna(value):
+                                conditions.append({
+                                    'indicator': str(indicator),
+                                    'operator': str(operator),
+                                    'value': str(value),
+                                    'exit_type': str(exit_type) if pd.notna(exit_type) else 'Signal'
+                                })
+                                logic_ops.append(str(logic) if pd.notna(logic) else '')
+                                exit_types.append(str(exit_type) if pd.notna(exit_type) else 'Signal')
+                        
+                        if conditions:
+                            condition_groups.append({
+                                'order': int(order),
+                                'conditions': conditions,
+                                'logic_to_next': logic_ops[0] if logic_ops else '',
+                                'exit_type': exit_types[0] if exit_types else 'Signal'
+                            })
+                else:
+                    # Fallback: treat each row as separate condition group
+                    for i, (_, row) in enumerate(rule_group.iterrows()):
+                        indicator = row.get('Indicator', '')
+                        operator = row.get('Operator', '')
+                        value = row.get('Value', '')
+                        logic = row.get('Logic', '')
+                        exit_type = row.get('Exit_Type_Filled', 'Signal')
+                        
+                        if pd.notna(indicator) and pd.notna(operator) and pd.notna(value):
+                            condition_groups.append({
+                                'order': i + 1,
+                                'conditions': [{
+                                    'indicator': str(indicator),
+                                    'operator': str(operator),
+                                    'value': str(value),
+                                    'exit_type': str(exit_type) if pd.notna(exit_type) else 'Signal'
+                                }],
+                                'logic_to_next': str(logic) if pd.notna(logic) else '',
+                                'exit_type': str(exit_type) if pd.notna(exit_type) else 'Signal'
+                            })
+                
+                # Sort condition groups by order
+                condition_groups.sort(key=lambda x: x['order'])
+                
+                # For backward compatibility, keep the old flat 'conditions' structure
+                # but add the new sophisticated 'condition_groups' structure
+                all_conditions = []
+                for group in condition_groups:
+                    all_conditions.extend(group['conditions'])
                 
                 parsed_exits[rule_name] = {
-                    'exit_type': str(exit_type) if pd.notna(exit_type) else 'Signal',
-                    'status': str(status) if pd.notna(status) else 'Inactive',
-                    'conditions': conditions
+                    'exit_type': condition_groups[0]['exit_type'] if condition_groups else 'Signal',
+                    'status': rule_status,
+                    'conditions': all_conditions,  # Backward compatibility
+                    'condition_groups': condition_groups,  # New sophisticated structure
+                    'total_conditions': sum(len(group['conditions']) for group in condition_groups)
                 }
             
             self.logger.info(f"Parsed {len(parsed_exits)} exit rules with enhanced format")
@@ -705,11 +865,33 @@ class ConfigLoader:
                 
                 # Get strategy parameters from first row
                 first_row = strategy_group.iloc[0]
-                entry_rule = str(first_row.get('Entry_Rule', '')) if pd.notna(first_row.get('Entry_Rule')) else ''
                 position_size = float(first_row.get('Position_Size', 1000)) if pd.notna(first_row.get('Position_Size')) else 1000
                 risk_per_trade = float(first_row.get('Risk_Per_Trade', 0.02)) if pd.notna(first_row.get('Risk_Per_Trade')) else 0.02
                 max_positions = int(first_row.get('Max_Positions', 1)) if pd.notna(first_row.get('Max_Positions')) else 1
                 status = str(first_row.get('Status', 'Inactive')) if pd.notna(first_row.get('Status')) else 'Inactive'
+                
+                # Parse enhanced options trading parameters
+                strike_preference = str(first_row.get('Strike_Preference', 'ATM')) if pd.notna(first_row.get('Strike_Preference')) else 'ATM'
+                cpr_target_stoploss = self._parse_boolean(first_row.get('CPR_TARGET_STOPLOSS', True))
+                breakout_confirmation = self._parse_boolean(first_row.get('Breakout_Confirmation', False))
+                sl_method = str(first_row.get('SL_Method', 'ATR')).upper() if pd.notna(first_row.get('SL_Method')) else 'ATR'
+                tp_method = str(first_row.get('TP_Method', 'Hybrid')).upper() if pd.notna(first_row.get('TP_Method')) else 'HYBRID'
+                real_option_data = self._parse_boolean(first_row.get('Real_Option_Data', True))
+                
+                # Parse new SL/TP configuration fields
+                buffer_sl_tp = float(first_row.get('Buffer SL/TP', 5)) if pd.notna(first_row.get('Buffer SL/TP')) else 5
+                max_sl_points = float(first_row.get('Max SL points', 45)) if pd.notna(first_row.get('Max SL points')) else 45
+                
+                # Collect entry rules from all rows (same logic as exit rules)
+                entry_rules = []
+                
+                for _, row in strategy_group.iterrows():
+                    entry_rule = row.get('Entry_Rule', '')
+                    if pd.notna(entry_rule) and entry_rule != '':
+                        entry_rules.append(str(entry_rule))
+                
+                # Remove duplicates while preserving order
+                entry_rules = list(dict.fromkeys(entry_rules))
                 
                 # Collect exit rules from all rows (both old multi-column and new single-column format)
                 exit_rules = []
@@ -731,12 +913,22 @@ class ConfigLoader:
                 exit_rules = list(dict.fromkeys(exit_rules))
                 
                 strategies[strategy_name] = {
-                    'entry_rule': entry_rule,
+                    'entry_rules': entry_rules,
                     'exit_rules': exit_rules,
                     'position_size': position_size,
                     'risk_per_trade': risk_per_trade,
                     'max_positions': max_positions,
-                    'status': status
+                    'status': status,
+                    # Enhanced options trading parameters
+                    'strike_preference': strike_preference,
+                    'cpr_target_stoploss': cpr_target_stoploss,
+                    'breakout_confirmation': breakout_confirmation,
+                    'sl_method': sl_method,
+                    'tp_method': tp_method,
+                    'real_option_data': real_option_data,
+                    # New SL/TP configuration fields
+                    'buffer_sl_tp': buffer_sl_tp,
+                    'max_sl_points': max_sl_points
                 }
             
             self.logger.info(f"Parsed {len(strategies)} strategy configurations")
@@ -792,14 +984,309 @@ class ConfigLoader:
                 issues.append("No valid strategies found")
             else:
                 for strategy_name, strategy_data in strategies.items():
-                    if not strategy_data['entry_rule']:
-                        issues.append(f"Strategy '{strategy_name}' has no entry rule")
+                    if not strategy_data['entry_rules']:
+                        issues.append(f"Strategy '{strategy_name}' has no entry rules")
                     if not strategy_data['exit_rules']:
                         issues.append(f"Strategy '{strategy_name}' has no exit rules")
+                    
+                    # Validate enhanced options trading parameters
+                    self._validate_strategy_options_params(strategy_name, strategy_data, issues)
         except Exception as e:
             issues.append(f"Error validating strategies: {e}")
         
         return issues
+    
+    def get_sl_tp_config(self) -> Dict[str, Any]:
+        """
+        Get SL/TP configuration parameters
+        
+        Returns:
+            Dictionary with SL/TP configuration
+        """
+        if not self._ensure_loaded():
+            self.logger.warning("Config not loaded, returning default SL/TP config")
+            return self._get_default_sl_tp_config()
+            
+        # Try to load from dedicated SL/TP config sheet
+        if 'sl_tp_config' in self.config_data:
+            return self._parse_sl_tp_config_sheet()
+        
+        # Fallback: extract SL/TP settings from strategy_config sheet
+        return self._extract_sl_tp_from_strategy_config()
+    
+    def _get_default_sl_tp_config(self) -> Dict[str, Any]:
+        """Get default SL/TP configuration"""
+        return {
+            'default_max_sl_points': 50,
+            'default_sl_method': 'ATR',
+            'default_tp_method': 'HYBRID',
+            'default_atr_period': 14,
+            'default_atr_multiplier': 1.5,
+            'default_min_risk_reward_ratio': 1.5,
+            'default_max_risk_reward_ratio': 3.0,
+            'default_risk_reward_ratios': [1.5, 2.0, 3.0],
+            'default_target_percentages': [50, 30, 20],
+            'default_breakout_buffer': 5,
+            'default_pivot_buffer': 2,
+            'default_volatility_adjustment': True,
+            'default_multi_target_mode': True,
+            'default_trailing_stop_enabled': False,
+            'default_trailing_distance': 20
+        }
+    
+    def _parse_sl_tp_config_sheet(self) -> Dict[str, Any]:
+        """Parse dedicated SL/TP config sheet"""
+        try:
+            df = self.config_data['sl_tp_config']
+            config = self._get_default_sl_tp_config()
+            
+            # Parse parameter-value pairs
+            for _, row in df.iterrows():
+                param = str(row.get('Parameter', '')).lower().strip()
+                value = row.get('Value', '')
+                
+                if param and pd.notna(value):
+                    # Map parameter names to config keys
+                    param_mapping = {
+                        'max_sl_points': 'default_max_sl_points',
+                        'sl_method': 'default_sl_method',
+                        'tp_method': 'default_tp_method',
+                        'atr_period': 'default_atr_period',
+                        'atr_multiplier': 'default_atr_multiplier',
+                        'min_risk_reward_ratio': 'default_min_risk_reward_ratio',
+                        'max_risk_reward_ratio': 'default_max_risk_reward_ratio',
+                        'breakout_buffer': 'default_breakout_buffer',
+                        'pivot_buffer': 'default_pivot_buffer',
+                        'volatility_adjustment': 'default_volatility_adjustment',
+                        'multi_target_mode': 'default_multi_target_mode',
+                        'trailing_stop_enabled': 'default_trailing_stop_enabled',
+                        'trailing_distance': 'default_trailing_distance'
+                    }
+                    
+                    if param in param_mapping:
+                        config_key = param_mapping[param]
+                        
+                        # Type conversion
+                        if param in ['max_sl_points', 'atr_period', 'breakout_buffer', 'pivot_buffer', 'trailing_distance']:
+                            config[config_key] = int(float(str(value)))
+                        elif param in ['atr_multiplier', 'min_risk_reward_ratio', 'max_risk_reward_ratio']:
+                            config[config_key] = float(str(value))
+                        elif param in ['volatility_adjustment', 'multi_target_mode', 'trailing_stop_enabled']:
+                            config[config_key] = str(value).lower() in ['true', '1', 'yes', 'on']
+                        elif param in ['risk_reward_ratios']:
+                            # Parse comma-separated values
+                            ratios = [float(x.strip()) for x in str(value).split(',') if x.strip()]
+                            config['default_risk_reward_ratios'] = ratios
+                        elif param in ['target_percentages']:
+                            # Parse comma-separated values
+                            percentages = [float(x.strip()) for x in str(value).split(',') if x.strip()]
+                            config['default_target_percentages'] = percentages
+                        else:
+                            config[config_key] = str(value)
+            
+            self.logger.info(f"Loaded SL/TP config from dedicated sheet")
+            return config
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing SL/TP config sheet: {e}")
+            return self._get_default_sl_tp_config()
+    
+    def _extract_sl_tp_from_strategy_config(self) -> Dict[str, Any]:
+        """Extract SL/TP settings from strategy_config sheet"""
+        try:
+            strategies = self.get_strategy_configs_enhanced()
+            config = self._get_default_sl_tp_config()
+            
+            # Look for SL/TP related columns in strategy config
+            if 'strategy_config' in self.config_data:
+                df = self.config_data['strategy_config']
+                
+                # Check for SL/TP columns
+                sl_tp_columns = [
+                    'Max_SL_Points', 'SL_Method', 'TP_Method', 
+                    'ATR_Period', 'ATR_Multiplier', 'Risk_Reward_Ratio',
+                    'Trailing_Stop_Enabled', 'Trailing_Distance'
+                ]
+                
+                for col in sl_tp_columns:
+                    if col in df.columns:
+                        # Use first non-null value as default
+                        values = df[col].dropna()
+                        if not values.empty:
+                            value = values.iloc[0]
+                            
+                            # Map to config key and convert type
+                            if col == 'Max_SL_Points':
+                                config['default_max_sl_points'] = int(float(str(value)))
+                            elif col == 'SL_Method':
+                                config['default_sl_method'] = str(value).upper()
+                            elif col == 'TP_Method':
+                                config['default_tp_method'] = str(value).upper()
+                            elif col == 'ATR_Period':
+                                config['default_atr_period'] = int(float(str(value)))
+                            elif col == 'ATR_Multiplier':
+                                config['default_atr_multiplier'] = float(str(value))
+                            elif col == 'Risk_Reward_Ratio':
+                                config['default_min_risk_reward_ratio'] = float(str(value))
+                            elif col == 'Trailing_Stop_Enabled':
+                                config['default_trailing_stop_enabled'] = str(value).lower() in ['true', '1', 'yes', 'on']
+                            elif col == 'Trailing_Distance':
+                                config['default_trailing_distance'] = int(float(str(value)))
+            
+            self.logger.info(f"Extracted SL/TP config from strategy config sheet")
+            return config
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting SL/TP config from strategy sheet: {e}")
+            return self._get_default_sl_tp_config()
+    
+    def get_strategy_sl_tp_config(self, strategy_name: str) -> Dict[str, Any]:
+        """
+        Get SL/TP configuration for specific strategy
+        
+        Args:
+            strategy_name: Name of the strategy
+            
+        Returns:
+            Strategy-specific SL/TP configuration
+        """
+        base_config = self.get_sl_tp_config()
+        
+        # Get strategy-specific overrides
+        strategies = self.get_strategy_configs_enhanced()
+        if strategy_name in strategies:
+            strategy_config = strategies[strategy_name]
+            
+            # Check for strategy-specific SL/TP parameters
+            strategy_overrides = {}
+            
+            # Map strategy config fields to SL/TP config
+            field_mapping = {
+                'max_sl_points': 'max_sl_points',
+                'sl_method': 'sl_method', 
+                'tp_method': 'tp_method',
+                'risk_per_trade': 'risk_per_trade',
+                'atr_period': 'atr_period',
+                'atr_multiplier': 'atr_multiplier'
+            }
+            
+            for strategy_field, config_field in field_mapping.items():
+                if strategy_field in strategy_config:
+                    strategy_overrides[config_field] = strategy_config[strategy_field]
+            
+            # Apply overrides to base config
+            final_config = base_config.copy()
+            for key, value in strategy_overrides.items():
+                # Remove 'default_' prefix and update
+                config_key = key if not key.startswith('default_') else key
+                final_config[f'default_{config_key}'] = value
+            
+            return final_config
+        
+        return base_config
+
+    def _parse_boolean(self, value: Any) -> bool:
+        """
+        Parse boolean value from various input types
+        
+        Args:
+            value: Value to parse as boolean
+            
+        Returns:
+            Boolean value
+        """
+        if pd.isna(value):
+            return False
+        
+        if isinstance(value, bool):
+            return value
+        
+        str_value = str(value).lower().strip()
+        return str_value in ['true', '1', 'yes', 'on', 'enabled']
+    
+    def _parse_user_friendly_date(self, date_value: Any) -> str:
+        """
+        Parse date from user-friendly dd-MM-yyyy format to system yyyy-MM-dd format
+        
+        Args:
+            date_value: Date value from Excel (can be datetime, string, etc.)
+            
+        Returns:
+            Date string in yyyy-MM-dd format
+        """
+        import pandas as pd
+        from datetime import datetime
+        
+        if pd.isna(date_value):
+            return ""
+        
+        # If it's already a datetime object (from Excel), extract date part
+        if hasattr(date_value, 'strftime'):
+            return date_value.strftime('%Y-%m-%d')
+        
+        # Convert to string for parsing
+        date_str = str(date_value).strip()
+        if not date_str or date_str.lower() == 'nan':
+            return ""
+        
+        # Try different date formats
+        date_formats = [
+            '%d-%m-%Y',           # dd-MM-yyyy (user-friendly)
+            '%d-%m-%Y %H:%M:%S',  # dd-MM-yyyy HH:MM:SS
+            '%Y-%m-%d',           # yyyy-MM-dd (existing format)
+            '%Y-%m-%d %H:%M:%S',  # yyyy-MM-dd HH:MM:SS (existing format)
+            '%d/%m/%Y',           # dd/MM/yyyy (alternative)
+            '%Y/%m/%d',           # yyyy/MM/dd (alternative)
+        ]
+        
+        for date_format in date_formats:
+            try:
+                parsed_date = datetime.strptime(date_str, date_format)
+                return parsed_date.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+        
+        # If no format worked, log warning and return as-is
+        self.logger.warning(f"Could not parse date format: {date_str}. Please use dd-MM-yyyy or yyyy-MM-dd format.")
+        return date_str
+    
+    def _validate_strategy_options_params(self, strategy_name: str, strategy_data: Dict[str, Any], issues: List[str]) -> None:
+        """
+        Validate enhanced options trading parameters for a strategy
+        
+        Args:
+            strategy_name: Name of the strategy
+            strategy_data: Strategy configuration data
+            issues: List to append validation issues to
+        """
+        try:
+            # Validate Strike_Preference
+            valid_strike_preferences = ['ATM', 'ITM1', 'ITM2', 'ITM3', 'OTM1', 'OTM2', 'OTM3']
+            strike_pref = strategy_data.get('strike_preference', 'ATM')
+            if strike_pref not in valid_strike_preferences:
+                issues.append(f"Strategy '{strategy_name}' has invalid strike_preference: {strike_pref}. Valid options: {valid_strike_preferences}")
+            
+            # Validate SL_Method
+            valid_sl_methods = ['ATR', 'BREAKOUT', 'PIVOT', 'FIXED']
+            sl_method = strategy_data.get('sl_method', 'ATR')
+            if sl_method not in valid_sl_methods:
+                issues.append(f"Strategy '{strategy_name}' has invalid sl_method: {sl_method}. Valid options: {valid_sl_methods}")
+            
+            # Validate TP_Method
+            valid_tp_methods = ['PIVOT', 'FIBONACCI', 'HYBRID', 'RATIO']
+            tp_method = strategy_data.get('tp_method', 'HYBRID')
+            if tp_method not in valid_tp_methods:
+                issues.append(f"Strategy '{strategy_name}' has invalid tp_method: {tp_method}. Valid options: {valid_tp_methods}")
+            
+            # Validate boolean fields
+            boolean_fields = ['cpr_target_stoploss', 'breakout_confirmation', 'real_option_data']
+            for field in boolean_fields:
+                value = strategy_data.get(field)
+                if value is not None and not isinstance(value, bool):
+                    issues.append(f"Strategy '{strategy_name}' has invalid {field}: {value}. Must be boolean (True/False)")
+                    
+        except Exception as e:
+            issues.append(f"Error validating options parameters for strategy '{strategy_name}': {e}")
     
     def build_rule_expression(self, condition_groups: List[Dict]) -> str:
         """

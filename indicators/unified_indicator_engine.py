@@ -41,6 +41,7 @@ except ImportError:
 
 try:
     from utils.config_loader import ConfigLoader
+    from utils.config_cache import get_cached_config
     from utils.logger import get_logger
     CONFIG_AVAILABLE = True
 except ImportError:
@@ -103,10 +104,11 @@ class BaseIndicatorEngine(ABC):
                 self.logger.info("[DATA] Using default indicators (config not available)")
                 return self._get_default_indicators()
             
-            # Try to load from config with enhanced error handling
-            config_loader = ConfigLoader(self.config_path)
-            if not config_loader.load_config():
-                self.logger.warning("[DATA] Config loading failed, using defaults")
+            # Try to load from config cache for optimized loading
+            config_cache = get_cached_config(self.config_path)
+            config_loader = config_cache.get_config_loader()
+            if not config_loader:
+                self.logger.warning("[DATA] Config cache loading failed, using defaults")
                 return self._get_default_indicators()
             
             try:
@@ -561,23 +563,23 @@ class BacktestingIndicatorEngine(BaseIndicatorEngine):
             return data
     
     def _calculate_ema_vectorized(self, data: pd.DataFrame, params: Dict) -> pd.DataFrame:
-        """Calculate EMA using optimized libraries for better performance."""
+        """
+        Calculate EMA using pandas ewm() for immediate valid values (no warm-up period).
+        
+        CRITICAL FIX: The ta.trend.ema_indicator() requires a warm-up period before producing
+        valid values (e.g., EMA_20 needs 19 data points, EMA_50 needs 49 data points).
+        This prevents early morning signals at 10:20-10:25 when only 5-10 data points exist.
+        
+        pandas.ewm() produces valid values immediately from the first data point,
+        ensuring EMAs are available for signal generation at expected times.
+        """
         periods = params.get('periods', [21])
         
-        # Use ta library for faster calculation if available
-        if TA_AVAILABLE:
-            self.logger.debug("[PERF] Using ta library for EMA calculation")
-            for period in periods:
-                data[f'ema_{period}'] = ta.trend.ema_indicator(data['close'], window=period)
-        elif TALIB_AVAILABLE:
-            self.logger.debug("[PERF] Using talib for EMA calculation")
-            for period in periods:
-                data[f'ema_{period}'] = talib.EMA(data['close'].values, timeperiod=period)
-        else:
-            # Fallback to pandas implementation
-            self.logger.debug("[PERF] Using pandas fallback for EMA calculation")
-            for period in periods:
-                data[f'ema_{period}'] = data['close'].ewm(span=period, adjust=False).mean()
+        # Use pandas ewm() method for immediate valid values
+        # This ensures EMA values start from the first data point, critical for early morning signals
+        self.logger.debug("[PERF] Using pandas ewm() for EMA calculation (immediate valid values)")
+        for period in periods:
+            data[f'ema_{period}'] = data['close'].ewm(span=period, adjust=False).mean()
         
         return data
     
@@ -845,56 +847,102 @@ class LiveTradingIndicatorEngine(BaseIndicatorEngine):
     
     def initialize_indicators(self, historical_data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         """
-        Initialize indicator states using historical data.
-        Called once at market open (9:15 AM).
+        ENHANCED: Initialize indicator states using historical data with COMPREHENSIVE WARMUP LOGIC.
+        Called once at market open (9:15 AM) with sufficient historical data for accuracy.
         
         Args:
-            historical_data: Last 100+ candles for warmup
+            historical_data: Last 200+ candles for optimal warmup (minimum: 3x max period)
             symbol: Trading symbol
             
         Returns:
-            Initial indicator states
+            Initial indicator states with production-grade accuracy
         """
         try:
-            self.logger.info(f"[ENGINE] Initializing live indicators for {symbol}")
+            self.logger.info(f"[ENGINE] Initializing live indicators for {symbol} with {len(historical_data)} warmup candles")
             
-            # Calculate initial indicators using vectorized operations
+            # WARMUP VALIDATION: Ensure sufficient historical data
+            if len(historical_data) < 50:
+                raise Exception(f"[CRITICAL] Insufficient warmup data for {symbol}. Got {len(historical_data)} candles, need minimum 50 for accurate indicators")
+            
+            # Calculate required warmup periods for each indicator type
+            max_ema_period = 0
+            max_sma_period = 0
+            max_rsi_period = 0
+            
+            for indicator_name, params in self.active_indicators.items():
+                if indicator_name == 'EMA':
+                    periods = params.get('periods', [])
+                    if periods:
+                        max_ema_period = max(max_ema_period, max(periods))
+                elif indicator_name == 'SMA':
+                    periods = params.get('periods', [])
+                    if periods:
+                        max_sma_period = max(max_sma_period, max(periods))
+                elif indicator_name == 'RSI':
+                    periods = params.get('periods', [params.get('period', 14)])
+                    if not isinstance(periods, list):
+                        periods = [periods]
+                    if periods:
+                        max_rsi_period = max(max_rsi_period, max(periods))
+            
+            # Validate warmup sufficiency
+            required_warmup = max(max_ema_period * 3, max_sma_period * 2, max_rsi_period * 3, 100)  # Conservative warmup
+            if len(historical_data) < required_warmup:
+                self.logger.warning(f"[WARMUP WARNING] {symbol}: {len(historical_data)} candles available, {required_warmup} recommended for max accuracy")
+                self.logger.warning(f"[WARMUP WARNING] EMA periods: {max_ema_period}, SMA periods: {max_sma_period}, RSI periods: {max_rsi_period}")
+            
+            # Calculate initial indicators using vectorized operations with enhanced warmup
             backtesting_engine = BacktestingIndicatorEngine(self.config_path)
             initial_data = backtesting_engine.calculate_indicators(historical_data)
             
             if initial_data.empty:
-                return {}
+                raise Exception(f"[CRITICAL] Failed to calculate initial indicators for {symbol} - empty result")
             
-            # Extract final states for incremental updates
+            # ENHANCED STATE EXTRACTION: Extract final states for incremental updates
             final_row = initial_data.iloc[-1]
             symbol_states = {}
+            
+            self.logger.info(f"[WARMUP] Successfully calculated {len(initial_data.columns)} indicators from {len(historical_data)} warmup candles")
             
             for indicator_name, params in self.active_indicators.items():
                 if indicator_name == 'EMA':
                     symbol_states['EMA'] = {}
                     for period in params.get('periods', []):
                         ema_col = f'ema_{period}'
-                        if ema_col in final_row:
+                        if ema_col in final_row and not pd.isna(final_row[ema_col]):
                             symbol_states['EMA'][period] = {
                                 'value': final_row[ema_col],
-                                'alpha': 2.0 / (period + 1)
+                                'alpha': 2.0 / (period + 1),
+                                'warmup_complete': True,
+                                'candles_used': len(historical_data)
                             }
+                            self.logger.info(f"[WARMUP] EMA-{period} initialized: {final_row[ema_col]:.2f} (from {len(historical_data)} candles)")
+                        else:
+                            self.logger.error(f"[WARMUP ERROR] EMA-{period} calculation failed - missing or NaN value")
                 
                 elif indicator_name == 'SMA':
                     symbol_states['SMA'] = {}
                     for period in params.get('periods', []):
                         sma_col = f'sma_{period}'
-                        if sma_col in final_row:
-                            # For SMA, we need the last N prices for incremental calculation
-                            last_prices = historical_data['close'].tail(period).tolist()
-                            symbol_states['SMA'][period] = {
-                                'value': final_row[sma_col],
-                                'prices': last_prices,
-                                'sum': sum(last_prices)
-                            }
+                        if sma_col in final_row and not pd.isna(final_row[sma_col]):
+                            # ENHANCED: Store sufficient price history for rolling calculation
+                            if len(historical_data) >= period:
+                                last_prices = historical_data['close'].tail(period).tolist()
+                                symbol_states['SMA'][period] = {
+                                    'value': final_row[sma_col],
+                                    'prices': last_prices,
+                                    'sum': sum(last_prices),
+                                    'warmup_complete': True,
+                                    'candles_used': len(historical_data)
+                                }
+                                self.logger.info(f"[WARMUP] SMA-{period} initialized: {final_row[sma_col]:.2f} (from {len(historical_data)} candles)")
+                            else:
+                                self.logger.error(f"[WARMUP ERROR] SMA-{period} needs {period} candles, only {len(historical_data)} available")
+                        else:
+                            self.logger.error(f"[WARMUP ERROR] SMA-{period} calculation failed - missing or NaN value")
                 
                 elif indicator_name == 'RSI':
-                    # Handle multiple RSI periods
+                    # ENHANCED RSI WARMUP: Handle multiple RSI periods with proper gain/loss calculation
                     periods = params.get('periods', [params.get('period', 14)])
                     if not isinstance(periods, list):
                         periods = [periods]
@@ -902,38 +950,95 @@ class LiveTradingIndicatorEngine(BaseIndicatorEngine):
                     symbol_states['RSI'] = {}
                     for period in periods:
                         rsi_col = f'rsi_{period}'
-                        if rsi_col in final_row:
-                            # Extract average gain/loss from historical calculation
-                            delta = historical_data['close'].diff().dropna()
-                            gain = delta.where(delta > 0, 0)
-                            loss = -delta.where(delta < 0, 0)
-                            
-                            # Calculate final average gain/loss using EWM
-                            avg_gain = gain.ewm(span=period, adjust=False).mean().iloc[-1]
-                            avg_loss = loss.ewm(span=period, adjust=False).mean().iloc[-1]
-                            
-                            symbol_states['RSI'][period] = {
-                                'value': final_row[rsi_col],
-                                'avg_gain': avg_gain,
-                                'avg_loss': avg_loss,
-                                'period': period,
-                                'last_close': final_row['close']
-                            }
+                        if rsi_col in final_row and not pd.isna(final_row[rsi_col]):
+                            # ENHANCED: Calculate accurate average gain/loss from historical data
+                            if len(historical_data) >= period * 2:  # Need 2x period for accurate RSI
+                                delta = historical_data['close'].diff().dropna()
+                                gain = delta.where(delta > 0, 0)
+                                loss = -delta.where(delta < 0, 0)
+                                
+                                # Use Wilder's smoothing (EWM with alpha=1/period)
+                                alpha = 1.0 / period
+                                avg_gain = gain.ewm(alpha=alpha, adjust=False).mean().iloc[-1]
+                                avg_loss = loss.ewm(alpha=alpha, adjust=False).mean().iloc[-1]
+                                
+                                symbol_states['RSI'][period] = {
+                                    'value': final_row[rsi_col],
+                                    'avg_gain': avg_gain,
+                                    'avg_loss': avg_loss,
+                                    'period': period,
+                                    'last_close': final_row['close'],
+                                    'warmup_complete': True,
+                                    'candles_used': len(historical_data)
+                                }
+                                self.logger.info(f"[WARMUP] RSI-{period} initialized: {final_row[rsi_col]:.2f} (avg_gain: {avg_gain:.4f}, avg_loss: {avg_loss:.4f})")
+                            else:
+                                self.logger.error(f"[WARMUP ERROR] RSI-{period} needs {period*2} candles for accuracy, only {len(historical_data)} available")
+                        else:
+                            self.logger.error(f"[WARMUP ERROR] RSI-{period} calculation failed - missing or NaN value")
                 
                 elif indicator_name == 'CPR':
-                    # Initialize CPR state with current pivot levels
+                    # ENHANCED CPR INITIALIZATION: Get real previous day OHLC for accurate CPR calculation
                     symbol_states['CPR'] = {}
-                    cpr_columns = ['CPR_Pivot', 'CPR_TC', 'CPR_BC', 'CPR_R1', 'CPR_R2', 'CPR_R3', 'CPR_R4', 'CPR_S1', 'CPR_S2', 'CPR_S3', 'CPR_S4']
-                    for col in cpr_columns:
-                        if col in final_row:
-                            symbol_states['CPR'][col] = final_row[col]
                     
-                    # Store last 3 day's OHLC for dynamic updates
-                    symbol_states['CPR']['last_ohlc'] = {
-                        'high': final_row.get('high', 0),
-                        'low': final_row.get('low', 0), 
-                        'close': final_row.get('close', 0)
-                    }
+                    # Try to get previous day data from database for accurate CPR
+                    previous_day_data = self._get_previous_day_ohlc(symbol, historical_data)
+                    
+                    if previous_day_data:
+                        # Calculate accurate CPR levels using real previous day data
+                        prev_high = previous_day_data['high']
+                        prev_low = previous_day_data['low']
+                        prev_close = previous_day_data['close']
+                        
+                        # Calculate CPR levels using industry-standard formulas (CORRECTED)
+                        pivot = (prev_high + prev_low + prev_close) / 3
+                        tc = (prev_high + prev_low) / 2  # Top Central (TC) = (H + L) / 2
+                        bc = 2 * pivot - tc  # Bottom Central (BC) = 2 * Pivot - TC
+                        
+                        # Resistance and Support levels
+                        r1 = 2 * pivot - prev_low
+                        r2 = pivot + (prev_high - prev_low)
+                        r3 = prev_high + (2 * (pivot - prev_low))
+                        r4 = r3 + (r2 - r1)
+                        
+                        s1 = 2 * pivot - prev_high
+                        s2 = pivot - (prev_high - prev_low)
+                        s3 = prev_low - (2 * (prev_high - pivot))
+                        s4 = s3 + (s2 - s1)
+                        
+                        symbol_states['CPR'] = {
+                            'CPR_Pivot': round(pivot, 2),
+                            'CPR_TC': round(tc, 2),
+                            'CPR_BC': round(bc, 2),
+                            'CPR_R1': round(r1, 2),
+                            'CPR_R2': round(r2, 2),
+                            'CPR_R3': round(r3, 2),
+                            'CPR_R4': round(r4, 2),
+                            'CPR_S1': round(s1, 2),
+                            'CPR_S2': round(s2, 2),
+                            'CPR_S3': round(s3, 2),
+                            'CPR_S4': round(s4, 2),
+                            'previous_day_high': prev_high,
+                            'previous_day_low': prev_low,
+                            'previous_day_close': prev_close,
+                            'calculation_date': datetime.now().strftime('%Y-%m-%d'),
+                            'warmup_complete': True
+                        }
+                        
+                        self.logger.info(f"[WARMUP] CPR initialized with REAL previous day data - Pivot: {pivot:.2f}, TC: {tc:.2f}, BC: {bc:.2f}")
+                        self.logger.info(f"[WARMUP] Previous day OHLC - H:{prev_high:.2f}, L:{prev_low:.2f}, C:{prev_close:.2f}")
+                    else:
+                        self.logger.error(f"[WARMUP ERROR] Could not fetch previous day data for CPR calculation - CPR will show 0.0")
+                        # Set zero values to indicate calculation failure
+                        symbol_states['CPR'] = {
+                            'CPR_Pivot': 0.0,
+                            'CPR_TC': 0.0,
+                            'CPR_BC': 0.0,
+                            'CPR_R1': 0.0, 'CPR_R2': 0.0, 'CPR_R3': 0.0, 'CPR_R4': 0.0,
+                            'CPR_S1': 0.0, 'CPR_S2': 0.0, 'CPR_S3': 0.0, 'CPR_S4': 0.0,
+                            'warmup_complete': False,
+                            'error': 'No previous day data available'
+                        }
                 
                 elif indicator_name in ['CurrentCandle', 'PreviousCandle', 'CurrentDayCandle', 'PreviousDayCandle']:
                     # Initialize candle value states
@@ -1099,7 +1204,7 @@ class LiveTradingIndicatorEngine(BaseIndicatorEngine):
     def calculate_live_indicators(self, current_data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         """
         Calculate indicators for live trading with current candle data.
-        Optimized for real-time performance.
+        PRODUCTION VERSION: NO FALLBACKS - FAIL FAST ON ERROR
         
         Args:
             current_data: DataFrame with current OHLCV data (single row)
@@ -1107,42 +1212,303 @@ class LiveTradingIndicatorEngine(BaseIndicatorEngine):
             
         Returns:
             Dictionary with all calculated indicator values
+            
+        Raises:
+            Exception: If real data is unavailable or calculation fails
+        """
+        if current_data.empty:
+            raise Exception(f"[CRITICAL] Empty market data received for {symbol}. Cannot calculate indicators without real data.")
+        
+        # Extract current candle data
+        current_row = current_data.iloc[-1]
+        new_candle = {
+            'open': current_row.get('open', 0),
+            'high': current_row.get('high', 0),
+            'low': current_row.get('low', 0),
+            'close': current_row.get('close', 0),
+            'volume': current_row.get('volume', 0)
+        }
+        
+        # Validate real market data
+        if not self._validate_real_market_data(new_candle, symbol):
+            raise Exception(f"[CRITICAL] Invalid or fake market data detected for {symbol}. System cannot proceed with trading calculations.")
+        
+        # PRODUCTION: Use production engine - NO FALLBACKS
+        if self.production_engine:
+            try:
+                return self.calculate_live_indicators_production(current_data, symbol)
+            except Exception as e:
+                self.logger.error(f"[CRITICAL] Production engine failed for {symbol}: {e}")
+                raise Exception(f"Production indicator calculation failed for {symbol}: {e}")
+        
+        # If symbol states exist, use incremental updates
+        if symbol in self.indicator_states:
+            try:
+                return self.update_indicators_incremental(new_candle, symbol)
+            except Exception as e:
+                self.logger.error(f"[CRITICAL] Incremental calculation failed for {symbol}: {e}")
+                raise Exception(f"Incremental indicator calculation failed for {symbol}: {e}")
+        
+        # NO FALLBACKS - FAIL IMMEDIATELY
+        raise Exception(f"[CRITICAL] No valid indicator calculation method available for {symbol}. System requires proper warmup and real data.")
+    
+    def _validate_real_market_data(self, candle_data: Dict[str, float], symbol: str) -> bool:
+        """
+        ENHANCED PRODUCTION-GRADE market data validation.
+        Comprehensive checks to prevent mock/fake data in live trading.
+        
+        Args:
+            candle_data: OHLCV candle data
+            symbol: Trading symbol
+            
+        Returns:
+            True if data appears real, False if suspicious
         """
         try:
-            if current_data.empty:
-                return {}
+            from datetime import datetime, timedelta, time as dt_time
             
-            # Extract current candle data
-            current_row = current_data.iloc[-1]
-            new_candle = {
-                'open': current_row.get('open', 0),
-                'high': current_row.get('high', 0),
-                'low': current_row.get('low', 0),
-                'close': current_row.get('close', 0),
-                'volume': current_row.get('volume', 0)
-            }
+            # Initialize validation tracking
+            if not hasattr(self, '_validation_history'):
+                self._validation_history = {}
+            if symbol not in self._validation_history:
+                self._validation_history[symbol] = {
+                    'last_candle_data': None,
+                    'last_update_time': None,
+                    'repeated_count': 0,
+                    'price_change_history': [],
+                    'validation_failures': 0
+                }
             
-            # PRODUCTION: Use production engine first
-            if self.production_engine:
-                try:
-                    return self.calculate_live_indicators_production(candle_data, symbol)
-                except Exception as e:
-                    self.logger.warning(f"[WARNING] Production engine failed, falling back to legacy: {e}")
+            validation_state = self._validation_history[symbol]
+            current_time = datetime.now()
             
-            # FALLBACK: If symbol states exist, use incremental updates
-            if symbol in self.indicator_states:
-                return self.update_indicators_incremental(new_candle, symbol)
+            # 1. BASIC PRICE VALIDATION
+            ohlc = [candle_data['open'], candle_data['high'], candle_data['low'], candle_data['close']]
+            if any(price <= 0 for price in ohlc):
+                self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Zero or negative prices detected - INVALID DATA")
+                validation_state['validation_failures'] += 1
+                return False
             
-            # ULTIMATE FALLBACK: Generate comprehensive indicators using simplified calculations
-            return self._generate_live_indicators_fallback(new_candle)
+            # 2. PRICE RELATIONSHIP VALIDATION
+            if candle_data['high'] < max(candle_data['open'], candle_data['close']):
+                self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Invalid price relationships (high < max(open,close)) - CORRUPTED DATA")
+                validation_state['validation_failures'] += 1
+                return False
+            
+            if candle_data['low'] > min(candle_data['open'], candle_data['close']):
+                self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Invalid price relationships (low > min(open,close)) - CORRUPTED DATA")
+                validation_state['validation_failures'] += 1
+                return False
+            
+            # 2.5. STATIC PRICE DETECTION (All OHLC values are identical - strong mock data indicator)
+            if (candle_data['open'] == candle_data['high'] == candle_data['low'] == candle_data['close']):
+                self.logger.error(f"[CRITICAL VALIDATION] {symbol}: All OHLC values identical ({candle_data['close']:.2f}) - CLEAR MOCK DATA PATTERN")
+                validation_state['validation_failures'] += 1
+                return False
+            
+            # 3. STATIC/REPEATED DATA DETECTION (CRITICAL FOR LIVE TRADING)
+            if validation_state['last_candle_data']:
+                last_data = validation_state['last_candle_data']
+                
+                # Exact match detection (mock data pattern)
+                if (last_data['open'] == candle_data['open'] and 
+                    last_data['high'] == candle_data['high'] and
+                    last_data['low'] == candle_data['low'] and
+                    last_data['close'] == candle_data['close']):
+                    
+                    validation_state['repeated_count'] += 1
+                    self.logger.error(f"[CRITICAL VALIDATION] {symbol}: IDENTICAL OHLCV data repeated {validation_state['repeated_count']} times - MOCK DATA DETECTED")
+                    
+                    # Allow only 1 repeat (sometimes API returns same candle briefly)
+                    if validation_state['repeated_count'] > 1:
+                        self.logger.error(f"[CRITICAL VALIDATION] {symbol}: REFUSING STATIC DATA - LIVE TRADING SAFETY VIOLATION")
+                        validation_state['validation_failures'] += 1
+                        return False
+                else:
+                    # Reset repeat counter on data change
+                    validation_state['repeated_count'] = 0
+            
+            # 4. DATA FRESHNESS VALIDATION
+            if validation_state['last_update_time']:
+                time_since_last = (current_time - validation_state['last_update_time']).total_seconds()
+                
+                # Data should update at least every 10 minutes in live trading
+                if time_since_last > 600:  # 10 minutes
+                    self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Data stale for {time_since_last:.0f} seconds - FEED INTERRUPTION")
+                    validation_state['validation_failures'] += 1
+                    return False
+            
+            # 5. PRICE MOVEMENT VALIDATION (Detect artificial patterns)
+            if validation_state['last_candle_data']:
+                last_close = validation_state['last_candle_data']['close']
+                current_close = candle_data['close']
+                price_change_pct = abs((current_close - last_close) / last_close) * 100
+                
+                # Track price changes
+                validation_state['price_change_history'].append(price_change_pct)
+                if len(validation_state['price_change_history']) > 10:
+                    validation_state['price_change_history'].pop(0)
+                
+                # Check for unrealistic price movements (circuit breaker range)
+                if price_change_pct > 20:  # 20% movement in 5 minutes is unrealistic
+                    self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Unrealistic price movement {price_change_pct:.2f}% - SUSPICIOUS DATA")
+                    validation_state['validation_failures'] += 1
+                    return False
+                
+                # Check for artificial constant movement patterns
+                if len(validation_state['price_change_history']) >= 5:
+                    recent_changes = validation_state['price_change_history'][-5:]
+                    if all(abs(change - recent_changes[0]) < 0.01 for change in recent_changes) and recent_changes[0] > 0:
+                        self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Artificial constant movement pattern detected - MOCK DATA")
+                        validation_state['validation_failures'] += 1
+                        return False
+            
+            # 6. SYMBOL-SPECIFIC RANGE VALIDATION
+            if symbol == 'NIFTY':
+                if not (15000 <= candle_data['close'] <= 35000):  # Extended realistic range
+                    self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Price {candle_data['close']} outside realistic NIFTY range (15000-35000)")
+                    validation_state['validation_failures'] += 1
+                    return False
+            elif symbol == 'BANKNIFTY':
+                if not (35000 <= candle_data['close'] <= 65000):  # Bank NIFTY range
+                    self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Price {candle_data['close']} outside realistic BANKNIFTY range")
+                    validation_state['validation_failures'] += 1
+                    return False
+            
+            # 7. VOLUME VALIDATION
+            if candle_data['volume'] < 0:
+                self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Negative volume detected - INVALID DATA")
+                validation_state['validation_failures'] += 1
+                return False
+            
+            # 8. MARKET HOURS VALIDATION (Indian market: 9:15 AM - 3:30 PM IST)
+            import pytz
+            ist = pytz.timezone('Asia/Kolkata')
+            market_time = current_time.astimezone(ist).time()
+            market_open = dt_time(9, 15)  # 9:15 AM
+            market_close = dt_time(15, 30)  # 3:30 PM
+            
+            # Allow some buffer for pre-market and post-market data
+            extended_open = dt_time(9, 0)   # 9:00 AM
+            extended_close = dt_time(16, 0)  # 4:00 PM
+            
+            if not (extended_open <= market_time <= extended_close):
+                # Weekend check
+                weekday = current_time.astimezone(ist).weekday()
+                if weekday >= 5:  # Saturday = 5, Sunday = 6
+                    self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Market data received on weekend - SUSPICIOUS")
+                    validation_state['validation_failures'] += 1
+                    return False
+            
+            # 9. VALIDATION SUCCESS - UPDATE STATE
+            validation_state['last_candle_data'] = candle_data.copy()
+            validation_state['last_update_time'] = current_time
+            validation_state['validation_failures'] = max(0, validation_state['validation_failures'] - 1)  # Reduce failure count on success
+            
+            # 10. LOG VALIDATION SUCCESS WITH DETAILS
+            self.logger.info(f"[VALIDATION SUCCESS] {symbol}: Real market data validated - O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
+            
+            return True
             
         except Exception as e:
-            self.logger.error(f"Live indicator calculation failed for {symbol}: {e}")
-            # Use production engine as fallback
-            if self.production_engine:
-                return self.calculate_live_indicators_production(candle_data, symbol)
-            else:
-                return self._generate_live_indicators_fallback({'close': 24000})  # Ultimate fallback
+            self.logger.error(f"[CRITICAL VALIDATION] {symbol}: Validation error - {e}")
+            return False
+    
+    def _get_previous_day_ohlc(self, symbol: str, historical_data: pd.DataFrame) -> Optional[Dict[str, float]]:
+        """
+        Get previous trading day OHLC data for accurate CPR calculation.
+        
+        Args:
+            symbol: Trading symbol
+            historical_data: Historical OHLCV data
+            
+        Returns:
+            Dictionary with previous day OHLC or None if unavailable
+        """
+        try:
+            from datetime import datetime, timedelta
+            
+            # Try database first for most accurate daily candles
+            if DUCKDB_AVAILABLE and hasattr(self, 'db_path') and os.path.exists(self.db_path):
+                try:
+                    conn = duckdb.connect(self.db_path)
+                    
+                    # Get previous trading day (excluding weekends)
+                    today = datetime.now()
+                    prev_day = today - timedelta(days=1)
+                    
+                    # Go back until we find a trading day (skip weekends)
+                    while prev_day.weekday() >= 5:  # Saturday = 5, Sunday = 6
+                        prev_day = prev_day - timedelta(days=1)
+                    
+                    # Query database for previous day's complete OHLC
+                    prev_date = prev_day.strftime('%Y-%m-%d')
+                    query = f"""
+                        SELECT 
+                            MAX(high) as high,
+                            MIN(low) as low,
+                            LAST(close ORDER BY timestamp) as close
+                        FROM ohlcv_data 
+                        WHERE symbol = '{symbol}' 
+                        AND DATE(timestamp) = '{prev_date}'
+                    """
+                    
+                    result = conn.execute(query).fetchone()
+                    conn.close()
+                    
+                    if result and result[0] is not None:
+                        return {
+                            'high': float(result[0]),
+                            'low': float(result[1]),
+                            'close': float(result[2])
+                        }
+                        
+                except Exception as e:
+                    self.logger.warning(f"[CPR] Database query failed: {e}")
+            
+            # Fallback: Use historical data to extract previous day
+            if not historical_data.empty and len(historical_data) > 75:  # Need enough data for previous day
+                try:
+                    # Assuming 5-minute candles, previous day would be ~75 candles back
+                    prev_day_start = len(historical_data) - 75
+                    prev_day_end = len(historical_data) - 1
+                    
+                    if prev_day_start >= 0:
+                        prev_day_data = historical_data.iloc[prev_day_start:prev_day_end]
+                        
+                        if not prev_day_data.empty:
+                            return {
+                                'high': float(prev_day_data['high'].max()),
+                                'low': float(prev_day_data['low'].min()),
+                                'close': float(prev_day_data['close'].iloc[-1])
+                            }
+                            
+                except Exception as e:
+                    self.logger.warning(f"[CPR] Historical data extraction failed: {e}")
+            
+            # Final fallback: Use OpenAlgo API to get previous day data
+            try:
+                if hasattr(self, 'market_data_fetcher') and self.market_data_fetcher:
+                    from datetime import datetime, timedelta
+                    prev_day = datetime.now() - timedelta(days=1)
+                    while prev_day.weekday() >= 5:
+                        prev_day = prev_day - timedelta(days=1)
+                    
+                    start_date = prev_day.strftime('%Y-%m-%d')
+                    end_date = prev_day.strftime('%Y-%m-%d')
+                    
+                    # This would require integration with market data fetcher
+                    # For now, return None to indicate no data available
+                    pass
+                    
+            except Exception as e:
+                self.logger.warning(f"[CPR] API fallback failed: {e}")
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"[CPR] Error getting previous day OHLC: {e}")
+            return None
     
     def calculate_live_indicators_production(self, candle_data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         """
@@ -1255,96 +1621,9 @@ class LiveTradingIndicatorEngine(BaseIndicatorEngine):
             self.logger.error(f"Production indicator calculation failed for {symbol}: {e}")
             raise Exception(f"Production calculation failed: {e}")
     
-    def _generate_live_indicators_fallback(self, candle_data: Dict[str, float]) -> Dict[str, Any]:
-        """Generate fallback indicators when states are not initialized."""
-        try:
-            import random
-            
-            close_price = float(candle_data.get('close', 24000))
-            high_price = float(candle_data.get('high', close_price))
-            low_price = float(candle_data.get('low', close_price))
-            open_price = float(candle_data.get('open', close_price))
-            volume = float(candle_data.get('volume', 1000))
-            
-            indicators = {}
-            
-            # EMA indicators (simplified for live mode)
-            ema_periods = [9, 21, 50, 200]
-            for period in ema_periods:
-                indicators[f'ema_{period}'] = close_price * (0.99 - period * 0.001)
-            
-            # SMA indicators (simplified)
-            for period in ema_periods:
-                indicators[f'sma_{period}'] = close_price * (0.995 - period * 0.0005)
-            
-            # RSI (mock calculation)
-            indicators['rsi_14'] = random.uniform(30, 70)
-            
-            # CPR calculations
-            pivot = (high_price + low_price + close_price) / 3
-            bc = (high_price + low_price) / 2
-            tc = (pivot - bc) + pivot
-            
-            indicators.update({
-                'cpr_pivot': pivot,
-                'cpr_bc': bc,
-                'cpr_tc': tc,
-                'cpr_r1': 2 * pivot - low_price,
-                'cpr_s1': 2 * pivot - high_price,
-                'cpr_r2': pivot + (high_price - low_price),
-                'cpr_s2': pivot - (high_price - low_price),
-                'cpr_r3': high_price + 2 * (pivot - low_price),
-                'cpr_s3': low_price - 2 * (high_price - pivot),
-                'cpr_r4': high_price + 3 * (pivot - low_price),
-                'cpr_s4': low_price - 3 * (high_price - pivot),
-                'cpr_cpr_width': abs(tc - bc),
-                'cpr_cpr_range': high_price - low_price
-            })
-            
-            # Supertrend (simplified)
-            atr_multiplier = 3.0
-            atr_estimate = (high_price - low_price) * 0.1
-            indicators.update({
-                'supertrend': close_price + atr_multiplier * atr_estimate,
-                'supertrend_signal': 1 if close_price > pivot else -1
-            })
-            
-            # VWAP (simplified estimate)
-            vwap_estimate = close_price * 1.001
-            std_dev = (high_price - low_price) * 0.05
-            indicators.update({
-                'vwap': vwap_estimate,
-                'vwap_upper_1': vwap_estimate + std_dev,
-                'vwap_lower_1': vwap_estimate - std_dev,
-                'vwap_upper_2': vwap_estimate + 2 * std_dev,
-                'vwap_lower_2': vwap_estimate - 2 * std_dev
-            })
-            
-            # Bollinger Bands (simplified)
-            bb_middle = close_price
-            bb_std = (high_price - low_price) * 0.1
-            indicators.update({
-                'bb_upper': bb_middle + 2 * bb_std,
-                'bb_middle': bb_middle,
-                'bb_lower': bb_middle - 2 * bb_std,
-                'bb_width': 4 * bb_std,
-                'bb_squeeze': 1 if bb_std < (high_price - low_price) * 0.05 else 0
-            })
-            
-            # Candle Values
-            indicators.update({
-                'candle_open': open_price,
-                'candle_high': high_price,
-                'candle_low': low_price,
-                'candle_close': close_price,
-                'candle_range': high_price - low_price
-            })
-            
-            return indicators
-            
-        except Exception as e:
-            self.logger.error(f"Fallback indicator generation failed: {e}")
-            return {}
+    # REMOVED: _generate_live_indicators_fallback() 
+    # PRODUCTION SAFETY: No fallback indicator generation allowed in live trading
+    # All indicators must be calculated from real market data with proper warmup
     
     def calculate_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
         """Compatibility method - delegates to incremental updates."""
@@ -1381,8 +1660,11 @@ class UnifiedIndicatorEngine:
         """Read trading mode from Excel configuration."""
         try:
             if CONFIG_AVAILABLE:
-                config_loader = ConfigLoader(self.config_path)
-                if config_loader.load_config():
+                # Use cached config loader
+                from utils.config_cache import get_cached_config
+                config_cache = get_cached_config(self.config_path)
+                config_loader = config_cache.get_config_loader()
+                if config_loader:
                     mode = config_loader.get_trading_mode()
                     # Always treat as string
                     return str(mode).lower()
@@ -1419,11 +1701,20 @@ class UnifiedIndicatorEngine:
             result = self.engine.calculate_indicators(data)
             
             # Filter to target date range for backtesting
-            if self.mode == 'backtest':
+            if 'backtest' in str(self.mode).lower():
                 start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                mask = (result.index >= start_dt) & (result.index <= end_dt)
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)  # Include the end date
+                
+                # Make sure the index is datetime
+                if not isinstance(result.index, pd.DatetimeIndex):
+                    if 'timestamp' in result.columns:
+                        result.set_index('timestamp', inplace=True)
+                    else:
+                        self.logger.warning("No timestamp column found, using existing index")
+                
+                mask = (result.index >= start_dt) & (result.index < end_dt)
                 result = result[mask].copy()
+                
                 # Ensure result is a DataFrame
                 if not isinstance(result, pd.DataFrame):
                     result = pd.DataFrame(result)
@@ -1436,10 +1727,19 @@ class UnifiedIndicatorEngine:
     def _get_target_timeframe(self, symbol: str) -> str:
         """Get target timeframe from configuration or default."""
         try:
-            # Try to get timeframe from instruments config
+            # Use config-driven timeframe for backtesting mode
+            if 'backtest' in str(self.mode).lower():
+                timeframe = self._get_instrument_timeframe(symbol)
+                self.logger.info(f"[BACKTEST] Using {timeframe} timeframe for {symbol} from instrument config")
+                return timeframe
+            
+            # For live mode, try to get timeframe from instruments config
             if CONFIG_AVAILABLE:
-                config_loader = ConfigLoader(self.config_path)
-                if config_loader.load_config():
+                # Use cached config loader
+                from utils.config_cache import get_cached_config
+                config_cache = get_cached_config(self.config_path)
+                config_loader = config_cache.get_config_loader()
+                if config_loader:
                     instruments = config_loader.get_active_instruments()
                     for instrument in instruments:
                         if instrument.get('symbol') == symbol:
@@ -1472,6 +1772,20 @@ class UnifiedIndicatorEngine:
         except Exception as e:
             self.logger.warning(f"[DATA] Error determining data source: {e}, defaulting to 1m aggregation")
             return 'aggregate_from_1m'
+    
+    def _get_instrument_timeframe(self, symbol: str) -> str:
+        """Get timeframe for specific symbol from config"""
+        try:
+            if CONFIG_AVAILABLE:
+                # Create config loader if not available
+                if not hasattr(self, 'config_loader') or not self.config_loader:
+                    from utils.config_loader import ConfigLoader
+                    self.config_loader = ConfigLoader(self.config_path)
+                return self.config_loader.get_instrument_timeframe(symbol)
+            return '5min'  # fallback
+        except Exception as e:
+            self.logger.warning(f"Error getting instrument timeframe: {e}")
+            return '5min'
     
     def _check_timeframe_exists(self, symbol: str, timeframe: str) -> bool:
         """Check if specific timeframe data exists in database with sufficient records."""
@@ -1597,8 +1911,11 @@ class UnifiedIndicatorEngine:
                 
                 # Get active indicators from config to calculate optimal warmup
                 if CONFIG_AVAILABLE:
-                    config_loader = ConfigLoader(self.config_path)
-                    if config_loader.load_config():
+                    # Use cached config loader
+                    from utils.config_cache import get_cached_config
+                    config_cache = get_cached_config(self.config_path)
+                    config_loader = config_cache.get_config_loader()
+                    if config_loader:
                         indicator_configs = config_loader.get_indicator_config()
                         max_warmup_candles = calculator.calculate_max_warmup_needed(indicator_configs)
                         

@@ -51,14 +51,16 @@ def _get_env_config() -> Dict[str, str]:
             'log_format': os.getenv('LOG_FORMAT', '%(asctime)s - %(name)s - %(levelname)s - %(message)s') or '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         }
 
-def setup_logger(name: str = "vAlgo", log_file: Optional[str] = None, log_level: Optional[str] = None) -> logging.Logger:
+def setup_logger(name: str = "vAlgo", log_file: Optional[str] = None, log_level: Optional[str] = None, 
+                daily_rotation: bool = True) -> logging.Logger:
     """
-    Set up a logger with consistent formatting
+    Set up a logger with consistent formatting and daily rotation
     
     Args:
         name: Logger name
         log_file: Log file path (default from env or logs/vAlgo.log)
         log_level: Log level (default from env or INFO)
+        daily_rotation: Enable daily log rotation (default True)
     
     Returns:
         Configured logger instance
@@ -78,6 +80,18 @@ def setup_logger(name: str = "vAlgo", log_file: Optional[str] = None, log_level:
         if not os.path.isabs(log_file):
             project_root = _get_project_root()
             log_file = str(project_root / log_file)
+        
+        # Apply daily rotation if enabled
+        if daily_rotation:
+            # Extract directory and base filename
+            log_path = Path(log_file)
+            log_dir = log_path.parent
+            base_name = log_path.stem
+            extension = log_path.suffix or '.log'
+            
+            # Create daily log filename: vAlgoLog_YYYYMMDD.log
+            today = datetime.now().strftime('%Y%m%d')
+            log_file = str(log_dir / f"{base_name}_{today}{extension}")
         
         # Ensure log directory exists
         log_path = Path(log_file)
@@ -110,10 +124,13 @@ def setup_logger(name: str = "vAlgo", log_file: Optional[str] = None, log_level:
         
         # File handler
         try:
-            file_handler = logging.FileHandler(log_file)
+            file_handler = logging.FileHandler(log_file, mode='w')
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
+            
+            if daily_rotation:
+                print(f"Daily rotation enabled: logging to {log_file}")
         except (OSError, PermissionError) as e:
             print(f"Warning: Could not create file handler: {e}")
         
