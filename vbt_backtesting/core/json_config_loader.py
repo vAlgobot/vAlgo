@@ -60,7 +60,7 @@ class JSONConfigLoader:
         self._strategies_config = None
         self._last_loaded = None
         
-        print(f"📁 JSON Config Loader initialized")
+        print(f"[CONFIG] JSON Config Loader initialized")
         print(f"   📂 Config Directory: {self.config_dir}")
     
     def load_all_configs(self, force_reload: bool = False) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -79,10 +79,10 @@ class JSONConfigLoader:
         try:
             # Check if we need to reload
             if not force_reload and self._configs_loaded():
-                print("📋 Using cached configurations")
+                print("[CACHE] Using cached configurations")
                 return self._main_config, self._strategies_config
             
-            print("🔄 Loading configurations from JSON files...")
+            print("[LOAD] Loading configurations from JSON files...")
             
             # Load and validate main configuration
             main_config_path = self.config_dir / "config.json"
@@ -107,12 +107,12 @@ class JSONConfigLoader:
             # Get detailed indicator summary
             indicator_summary = self.get_indicator_summary()
             
-            print("✅ All configurations loaded and validated successfully")
-            print(f"   📊 Strategy Cases: {total_cases} total, {len(active_case_names)} active")
-            print(f"   🎯 Cases: ({', '.join(active_case_names) if active_case_names else 'None'})")
+            print("[SUCCESS] All configurations loaded and validated successfully")
+            print(f"   [STATS] Strategy Cases: {total_cases} total, {len(active_case_names)} active")
+            print(f"   [CASES] Cases: ({', '.join(active_case_names) if active_case_names else 'None'})")
             print(f"   🔧 Enabled Indicators: {len(indicator_summary['enabled_list'])} ({', '.join(indicator_summary['enabled_list'])})")
             print(f"   🔑 Created Indicator keys: {indicator_summary['total_keys']}")
-            print(f"   ⚡ Performance Target: {self._main_config['system']['performance_target']}")
+            print(f"   [TARGET] Performance Target: {self._main_config['system']['performance_target']}")
             
             return self._main_config, self._strategies_config
             
@@ -266,8 +266,8 @@ class JSONConfigLoader:
         # Get all enabled indicators from config
         available_indicators = self.get_enabled_indicators_from_config()
         
-        print(f"✅ Indicator key validation passed")
-        print(f"   📊 Total available indicator keys: {len(available_indicators)}")
+        print(f"[SUCCESS] Indicator key validation passed")
+        print(f"   [STATS] Total available indicator keys: {len(available_indicators)}")
         print(f"   🔧 Market data keys: 5 (close, open, high, low, volume)")
         print(f"   🧮 Calculated indicator keys: {len(available_indicators) - 5}")
     
@@ -331,7 +331,7 @@ class JSONConfigLoader:
     
     def reload_configs(self) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """Force reload all configurations"""
-        print("🔄 Force reloading configurations...")
+        print("[RELOAD] Force reloading configurations...")
         return self.load_all_configs(force_reload=True)
     
     def validate_config_files_exist(self) -> bool:
@@ -377,7 +377,7 @@ if __name__ == "__main__":
         
         # Display summary
         summary = loader.get_config_summary()
-        print("\n📋 Configuration Summary:")
+        print("\n[SUMMARY] Configuration Summary:")
         for key, value in summary.items():
             print(f"   {key}: {value}")
         
@@ -388,5 +388,5 @@ if __name__ == "__main__":
             print(f"   - {indicator}")
             
     except ConfigurationError as e:
-        print(f"❌ Configuration loading failed: {e}")
+        print(f"[ERROR] Configuration loading failed: {e}")
         sys.exit(1)

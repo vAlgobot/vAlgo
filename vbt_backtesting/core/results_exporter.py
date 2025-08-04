@@ -118,6 +118,29 @@ class ResultsExporter(ProcessorBase):
                     csv_paths = self._export_csv(results, output_dir, filename_base)
                     exported_files.update(csv_paths)
                 
+                # Export trade comparison CSV if available
+                self.log_major_component("[CHECKING] CHECKING TRADE COMPARISON EXPORT", "RESULTS_EXPORT")
+                self.log_detailed(f"Available keys in results: {list(results.keys())}", "INFO")
+                self.log_detailed(f"Looking for 'trade_comparison' key in results", "INFO")
+                
+                if 'trade_comparison' in results:
+                    self.log_major_component("[SUCCESS] TRADE COMPARISON DATA FOUND - STARTING EXPORT", "RESULTS_EXPORT")
+                    trade_comparison_data = results['trade_comparison']
+                    self.log_detailed(f"Trade comparison data type: {type(trade_comparison_data)}", "DEBUG")
+                    self.log_detailed(f"Trade comparison data keys: {list(trade_comparison_data.keys()) if isinstance(trade_comparison_data, dict) else 'Not a dict'}", "DEBUG")
+                    
+                    comparison_csv_path = self._export_trade_comparison_csv(
+                        trade_comparison_data, output_dir, filename_base
+                    )
+                    if comparison_csv_path:
+                        exported_files['trade_comparison_csv'] = str(comparison_csv_path)
+                        self.log_major_component(f"[SUCCESS] TRADE COMPARISON CSV EXPORT SUCCESS: {comparison_csv_path.name}", "RESULTS_EXPORT")
+                    else:
+                        self.log_major_component("[ERROR] TRADE COMPARISON CSV EXPORT FAILED", "RESULTS_EXPORT")
+                else:
+                    self.log_major_component("[ERROR] NO TRADE COMPARISON DATA IN RESULTS", "RESULTS_EXPORT")
+                    self.log_detailed("This means trade comparison was not added to results in Phase 6.5", "WARNING")
+                
                 if 'excel' in self.enabled_formats:
                     excel_path = self._export_excel(results, output_dir, filename_base)
                     if excel_path:
@@ -885,6 +908,97 @@ class ResultsExporter(ProcessorBase):
                 'enabled_formats': self.enabled_formats
             }
         }
+    
+    def _export_trade_comparison_csv(self, trade_comparison_data: Dict[str, Any], 
+                                   output_dir: Path, filename_base: str) -> Optional[Path]:
+        """
+        Export trade comparison results to CSV.
+        
+        Args:
+            trade_comparison_data: Dictionary containing comparison results and statistics
+            output_dir: Output directory path
+            filename_base: Base filename for export
+            
+        Returns:
+            Path to exported comparison CSV file or None if failed
+        """
+        try:
+            self.log_detailed("[INIT] Starting _export_trade_comparison_csv method", "INFO")
+            
+            # Extract comparison results
+            comparison_results = trade_comparison_data.get('comparison_results', [])
+            self.log_detailed(f"Extracted comparison_results: {len(comparison_results) if comparison_results else 0} records", "INFO")
+            
+            if not comparison_results:
+                self.log_detailed("[ERROR] No trade comparison results to export", "WARNING")
+                self.log_detailed(f"Available keys in trade_comparison_data: {list(trade_comparison_data.keys()) if isinstance(trade_comparison_data, dict) else 'Not a dict'}", "WARNING")
+                return None
+                
+            # Create comparison DataFrame
+            comparison_df = pd.DataFrame(comparison_results)
+            
+            # Define ordered columns for logical grouping and better readability
+            ordered_columns = [
+                # 1. TIMESTAMPS & TIME COMPARISONS (All time-related data first)
+                'entry_time_vbt', 'entry_time_quantman', 
+                'exit_time_vbt', 'exit_time_quantman',
+                'entry_time_match', 'exit_time_match', 
+                'entry_time_diff_minutes', 'exit_time_diff_minutes',
+                
+                # 2. STRIKE COMPARISONS  
+                'strike_vbt', 'strike_quantman', 'strike_match',
+                
+                # 3. PREMIUM COMPARISONS
+                'entry_premium_vbt', 'entry_premium_quantman', 'entry_premium_diff', 'entry_premium_within_tolerance',
+                'exit_premium_vbt', 'exit_premium_quantman', 'exit_premium_diff', 'exit_premium_within_tolerance',
+                
+                # 4. OPTION TYPE COMPARISON
+                'option_type_vbt', 'option_type_quantman', 'option_type_match',
+                
+                # 5. TRADE IDENTIFICATION (Last)
+                'trade_status', 'vbt_trade_id', 'quantman_transaction'
+            ]
+            
+            # Reorder columns if they exist
+            available_columns = [col for col in ordered_columns if col in comparison_df.columns]
+            if available_columns:
+                comparison_df = comparison_df[available_columns]
+            
+            # Create comparison CSV filename
+            csv_filename = f"{filename_base}_trade_comparison.csv"
+            csv_path = output_dir / csv_filename
+            
+            # Log exact export path for debugging
+            self.log_detailed(f"Trade comparison CSV absolute path: {csv_path.absolute()}", "INFO")
+            self.log_detailed(f"Output directory exists: {output_dir.exists()}", "INFO")
+            self.log_detailed(f"Output directory absolute path: {output_dir.absolute()}", "INFO")
+            
+            # Export to CSV
+            comparison_df.to_csv(csv_path, index=False)
+            
+            # Verify file was created
+            if csv_path.exists():
+                file_size = csv_path.stat().st_size
+                self.log_detailed(f"Trade comparison CSV successfully created: {csv_path.name} ({file_size} bytes)", "INFO")
+            else:
+                self.log_detailed(f"Trade comparison CSV creation failed: {csv_path}", "ERROR")
+            
+            # Log comparison statistics
+            comparison_stats = trade_comparison_data.get('comparison_stats', {})
+            self.log_detailed(f"Trade comparison exported: {len(comparison_results)} comparisons", "INFO")
+            self.log_detailed(f"Match rate: {comparison_stats.get('match_rate', 0):.2%}", "INFO")
+            self.log_detailed(f"Missing in VBT: {comparison_stats.get('missing_in_vbt', 0)}", "INFO")
+            
+            self.log_major_component(
+                f"Trade comparison CSV exported: {csv_filename}",
+                "RESULTS_EXPORT"
+            )
+            
+            return csv_path
+            
+        except Exception as e:
+            self.log_detailed(f"Error exporting trade comparison CSV: {e}", "ERROR")
+            return None
 
 
 # Convenience function for external use

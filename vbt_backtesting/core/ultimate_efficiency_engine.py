@@ -40,6 +40,7 @@ from core.signal_extractor import SignalExtractor
 from core.options_pnl_calculator import OptionsPnLCalculator
 from core.results_compiler import ResultsCompiler
 from core.results_exporter import ResultsExporter
+from core.trade_comparator import TradeComparator
 # Selective logger - direct import
 from utils.selective_logger import get_selective_logger, reset_selective_logger
 
@@ -165,6 +166,9 @@ class UltimateEfficiencyEngine:
             self.results_exporter = ResultsExporter(
                 self.config_loader, self.selective_logger
             )
+            self.trade_comparator = TradeComparator(
+                self.config_loader, self.selective_logger
+            )
             print(f"   ✅ All modular components ready in {time.time() - modular_start:.2f}s")
             
             init_time = time.time() - init_start
@@ -265,6 +269,64 @@ class UltimateEfficiencyEngine:
                 market_data, indicators, trade_signals, options_pnl
             )
             self.performance_stats['results_compilation_time'] = time.time() - compile_start
+            
+            # Phase 6.5: Trade Comparison (Optional)
+            trade_comparison_results = None
+            self.selective_logger.log_major_component(f"PHASE 6.5: Trade Comparison - Enabled: {self.trade_comparator.enabled}", "TRADE_COMPARISON")
+            
+            if self.trade_comparator.enabled:
+                comparison_start = time.time()
+                self.selective_logger.log_detailed("Starting trade comparison process", "INFO")
+                
+                # Debug: Log what keys are available in options_pnl
+                self.selective_logger.log_detailed(f"Options P&L keys available: {list(options_pnl.keys())}", "DEBUG")
+                
+                # Extract trades data from options_pnl for comparison
+                # The correct key is 'trades_data' based on options_pnl_calculator.py analysis
+                trades_data = options_pnl.get('trades_data', [])
+                self.selective_logger.log_detailed(f"Raw trades_data from P&L: {type(trades_data)}, length: {len(trades_data) if trades_data else 'None'}", "DEBUG")
+                
+                if trades_data and len(trades_data) > 0:
+                    self.selective_logger.log_detailed(f"Sample trade from trades_data: {trades_data[0]}", "DEBUG")
+                
+                # Try alternative keys if trades_data is not found
+                if not trades_data:
+                    self.selective_logger.log_detailed("'trades_data' key is empty, checking alternative keys", "DEBUG")
+                    # Check for other possible trade data keys
+                    possible_keys = ['trade_details', 'trades', 'trade_data', 'all_trades', 'executed_trades']
+                    for key in possible_keys:
+                        if key in options_pnl and options_pnl[key]:
+                            trades_data = options_pnl[key]
+                            self.selective_logger.log_detailed(f"Found trade data in key: {key}", "DEBUG")
+                            break
+                
+                self.selective_logger.log_detailed(f"Trade data for comparison: {len(trades_data) if trades_data else 0} records", "DEBUG")
+                
+                if trades_data:
+                    backtesting_config = {
+                        'start_date': start_date,
+                        'end_date': end_date
+                    }
+                    trade_comparison_results = self.trade_comparator.compare_trades(
+                        trades_data, backtesting_config
+                    )
+                    if trade_comparison_results:
+                        results['trade_comparison'] = trade_comparison_results
+                        self.selective_logger.log_major_component("Trade comparison completed successfully", "TRADE_COMPARISON")
+                        # Log comparison results structure for debugging
+                        # self.selective_logger.log_detailed(f"Trade comparison keys: {list(trade_comparison_results.keys())}", "DEBUG")
+                        # comparison_results = trade_comparison_results.get('comparison_results', [])
+                        # self.selective_logger.log_detailed(f"Number of comparison results: {len(comparison_results) if comparison_results else 0}", "DEBUG")
+                        # self.selective_logger.log_detailed(f"✅ CRITICAL: Trade comparison added to results with key 'trade_comparison'", "INFO")
+                    else:
+                        self.selective_logger.log_detailed("Trade comparison returned no results", "WARNING")
+                else:
+                    self.selective_logger.log_detailed("No trade data found for comparison", "WARNING")
+                        
+                self.performance_stats['trade_comparison_time'] = time.time() - comparison_start
+            else:
+                self.selective_logger.log_detailed("[WARNING] Trade comparator is disabled - skipping comparison", "INFO")
+                self.performance_stats['trade_comparison_time'] = 0
             
             # Phase 7: Results Export (Modular)
             if enable_export:
@@ -596,9 +658,9 @@ if __name__ == "__main__":
         print("🚀 Ultimate Efficiency Engine - Production Test")
         print("=" * 60)
         
-        # Initialize engine
+        # Initialize engine with proper config directory
         engine = UltimateEfficiencyEngine()
-        
+                  
         # Run complete analysis
         results = engine.run_complete_analysis(
             symbol="NIFTY",
@@ -606,7 +668,7 @@ if __name__ == "__main__":
             enable_export=True
         )
         
-        # Close connections
+        #Close connections
         engine.close_connections()
         
         print("\n✅ Ultimate Efficiency Engine test completed successfully!")
