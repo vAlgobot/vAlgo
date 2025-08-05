@@ -269,3 +269,4 @@ Project_Tracker.xlsx
 config/config_backup*.xlsx
 docs_archive/
 test/
+.claude/settings.local.json
