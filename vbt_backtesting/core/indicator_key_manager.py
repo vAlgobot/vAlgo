@@ -293,13 +293,27 @@ class IndicatorKeyManager:
         enabled_summary = {}
         
         for indicator_name, indicator_config in main_config['indicators'].items():
-            if indicator_config.get('enabled', False):
-                enabled_summary[indicator_name] = {
-                    'enabled': True,
-                    'periods': indicator_config.get('periods', []),
-                    'talib_function': indicator_config.get('talib_function'),
-                    'config': {k: v for k, v in indicator_config.items() if k not in ['enabled']}
-                }
+            # Skip non-indicator config keys
+            if indicator_name in ['allow_numpy_fallback', 'require_complete_calculation']:
+                continue
+            
+            # Handle both boolean and dictionary configurations    
+            if isinstance(indicator_config, bool):
+                if indicator_config:  # If True, add basic configuration
+                    enabled_summary[indicator_name] = {
+                        'enabled': True,
+                        'periods': [],
+                        'talib_function': None,
+                        'config': {}
+                    }
+            elif isinstance(indicator_config, dict):
+                if indicator_config.get('enabled', False):
+                    enabled_summary[indicator_name] = {
+                        'enabled': True,
+                        'periods': indicator_config.get('periods', []),
+                        'talib_function': indicator_config.get('talib_function'),
+                        'config': {k: v for k, v in indicator_config.items() if k not in ['enabled']}
+                    }
         
         return enabled_summary
     

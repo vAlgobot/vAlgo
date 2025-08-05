@@ -30,6 +30,7 @@ import warnings
 sys.path.append(str(Path(__file__).parent.parent))
 
 from core.json_config_loader import JSONConfigLoader, ConfigurationError
+from core.dynamic_warmup_calculator import DynamicWarmupCalculator
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -114,12 +115,16 @@ class EfficientDataLoader:
             'query_time_saved': 0.0
         }
         
+        # Initialize warmup calculator for intelligent data loading
+        self.warmup_calculator = DynamicWarmupCalculator(config_loader)
+        
         # Initialize database connection
         self._initialize_database()
         
         print(f"🔥 Ultra-Efficient Data Loader initialized")
         print(f"   📊 Database: {self.db_path}")
         print(f"   🚀 Batch Processing: Enabled")
+        print(f"   🔥 Warmup-Aware Loading: Enabled")
         print(f"   ⚡ Performance Target: 100-1000x faster strike selection")
     
     def _initialize_database(self) -> None:
@@ -243,6 +248,124 @@ class EfficientDataLoader:
         except Exception as e:
             self.logger.log_detailed(f"Error loading OHLCV data for {symbol}: {e}", "ERROR", "DATA_LOADER")
             raise ConfigurationError(f"OHLCV data loading failed: {e}")
+    
+    def get_ohlcv_data_with_warmup(
+        self, 
+        symbol: str, 
+        exchange: str, 
+        timeframe: str,
+        backtest_start_date: str, 
+        backtest_end_date: str
+    ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """
+        Retrieve OHLCV data with automatic warmup period extension.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'NIFTY')
+            exchange: Exchange name (e.g., 'NSE')
+            timeframe: Time interval (e.g., '5m')
+            backtest_start_date: Desired backtest start date in YYYY-MM-DD format
+            backtest_end_date: Backtest end date in YYYY-MM-DD format
+            
+        Returns:
+            Tuple of (DataFrame with extended OHLCV data, warmup analysis dict)
+            
+        Raises:
+            ConfigurationError: If data loading fails or insufficient data for warmup
+        """
+        try:
+            print(f"🔥 Loading OHLCV data with database-driven warmup extension...")
+            
+            # Use database-driven warmup calculation instead of calendar-based
+            date_analysis = self.warmup_calculator.get_actual_warmup_start_from_db(
+                connection=self.connection,
+                symbol=symbol,
+                exchange=exchange,
+                timeframe=timeframe,
+                start_date=backtest_start_date
+            )
+            
+            extended_start_date = date_analysis['database_extended_start_date'].strftime('%Y-%m-%d')
+            
+            print(f"📅 Database-Driven Extension Analysis:")
+            print(f"   🎯 Backtest period: {backtest_start_date} to {backtest_end_date}")
+            print(f"   ⬅️  Extended start (DB): {extended_start_date}")
+            print(f"   📏 Actual extension: {date_analysis['actual_days_extended']} calendar days")
+            print(f"   📊 Warmup candles: {date_analysis['available_warmup_candles']}")
+            
+            # Load extended data range using database-determined start date
+            extended_data = self.get_ohlcv_data(
+                symbol=symbol,
+                exchange=exchange,
+                timeframe=timeframe,
+                start_date=extended_start_date,
+                end_date=backtest_end_date
+            )
+            
+            # Validate data sufficiency
+            if len(extended_data) == 0:
+                raise ConfigurationError("No data found in extended date range")
+            
+            # Database-driven approach already validated sufficient data
+            # No additional validation needed as the query ensured we have required candles
+            actual_start_date = extended_data.index[0].strftime('%Y-%m-%d')
+            
+            # Create validation result based on database query success
+            validation_result = {
+                'sufficient_data': True,
+                'confidence_percentage': 100.0,  # Database query ensures we have exactly what we need
+                'method': 'database_driven',
+                'required_candles': date_analysis['required_warmup_candles'],
+                'available_candles': date_analysis['available_warmup_candles']
+            }
+            
+            # Create comprehensive analysis using database-driven results
+            warmup_analysis = {
+                'original_backtest_range': {
+                    'start': backtest_start_date,
+                    'end': backtest_end_date
+                },
+                'extended_data_range': {
+                    'start': actual_start_date,
+                    'end': extended_data.index[-1].strftime('%Y-%m-%d')
+                },
+                'warmup_info': date_analysis['warmup_analysis'],
+                'database_analysis': date_analysis,
+                'validation_result': validation_result,
+                # Add key fields expected by ultimate_efficiency_engine.py
+                'days_extended': date_analysis['actual_days_extended'],
+                'max_warmup_candles': date_analysis['required_warmup_candles'],
+                'method': 'database_driven',
+                'data_stats': {
+                    'total_records': len(extended_data),
+                    'extended_records': len(extended_data[extended_data.index < backtest_start_date]),
+                    'backtest_records': len(extended_data[extended_data.index >= backtest_start_date])
+                }
+            }
+            
+            print(f"✅ Warmup-extended data loaded successfully:")
+            print(f"   📊 Total records: {len(extended_data):,}")
+            print(f"   🔥 Warmup records: {warmup_analysis['data_stats']['extended_records']:,}")
+            print(f"   🎯 Backtest records: {warmup_analysis['data_stats']['backtest_records']:,}")
+            print(f"   📈 Confidence: {validation_result['confidence_percentage']:.1f}%")
+            
+            return extended_data, warmup_analysis
+            
+        except Exception as e:
+            self.logger.log_detailed(f"Error loading warmup-extended data for {symbol}: {e}", "ERROR", "DATA_LOADER")
+            raise ConfigurationError(f"Warmup-extended data loading failed: {e}")
+    
+    def get_warmup_requirements(self, start_date: str) -> Dict[str, Any]:
+        """
+        Get warmup requirements for a given start date.
+        
+        Args:
+            start_date: Desired backtest start date
+            
+        Returns:
+            Dictionary with warmup analysis
+        """
+        return self.warmup_calculator.calculate_extended_start_date(start_date)
     
     def batch_get_strikes_premium_ultra_fast(
         self, 

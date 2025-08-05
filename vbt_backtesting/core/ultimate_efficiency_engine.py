@@ -106,6 +106,7 @@ class UltimateEfficiencyEngine:
                 'initialization_time': 0,
                 'data_loading_time': 0,
                 'indicator_calculation_time': 0,
+                'data_filtering_time': 0,
                 'signal_generation_time': 0,
                 'trade_extraction_time': 0,
                 'pnl_calculation_time': 0,
@@ -211,39 +212,84 @@ class UltimateEfficiencyEngine:
             start_date = start_date or self.main_config['backtesting']['start_date']
             end_date = end_date or self.main_config['backtesting']['end_date']
             
-            # Phase 1: Ultra-Efficient Data Loading
+            # Phase 1: Ultra-Efficient Data Loading with Dynamic Warmup
             data_start = time.time()
             exchange = self.main_config['trading']['exchange']
-            market_data = self.data_loader.get_ohlcv_data(symbol, exchange, timeframe, start_date, end_date)
+            market_data, warmup_analysis = self.data_loader.get_ohlcv_data_with_warmup(
+                symbol, exchange, timeframe, start_date, end_date
+            )
             self.performance_stats['data_loading_time'] = time.time() - data_start
             self.performance_stats['total_records_processed'] = len(market_data)
             
-            # Phase 2: Smart Indicator Calculation
+            # Log warmup analysis
+            self.selective_logger.log_detailed(
+                f"Warmup period applied: {warmup_analysis['days_extended']} calendar days, "
+                f"{warmup_analysis['max_warmup_candles']} candles needed", 
+                "INFO", "WARMUP_SYSTEM"
+            )
+            
+            # Phase 2: Smart Indicator Calculation (with warmup data)
             indicator_start = time.time()
             indicators = self.indicator_engine.calculate_indicators(market_data)
             self.performance_stats['indicator_calculation_time'] = time.time() - indicator_start
             
-            # Phase 3: VectorBT Signal Generation (Modular)
+            # Phase 2.5: Filter to Backtesting Period (after warmup-calculated indicators)
+            filter_start = time.time()
+            self.selective_logger.log_detailed(f"Filtering data to backtesting period: {start_date} to {end_date}", "INFO", "DATA_FILTERING")
+            
+            # Create filter mask for backtesting period only
+            backtest_mask = market_data.index >= start_date
+            filtered_market_data = market_data[backtest_mask].copy()
+            
+            # Filter indicators dictionary - each indicator is a numpy array or pandas Series
+            filtered_indicators = {}
+            for indicator_name, indicator_values in indicators.items():
+                if hasattr(indicator_values, '__len__') and len(indicator_values) == len(market_data):
+                    # Apply same mask to indicator values
+                    if hasattr(indicator_values, 'iloc'):  # pandas Series
+                        filtered_indicators[indicator_name] = indicator_values.iloc[backtest_mask]
+                    else:  # numpy array
+                        filtered_indicators[indicator_name] = indicator_values[backtest_mask]
+                else:
+                    # Keep indicators that aren't data arrays (e.g., metadata)
+                    filtered_indicators[indicator_name] = indicator_values
+            
+            # Log filtering results
+            warmup_records = len(market_data) - len(filtered_market_data)
+            self.selective_logger.log_detailed(
+                f"Data filtering complete: {len(market_data):,} -> {len(filtered_market_data):,} records "
+                f"({warmup_records:,} warmup records removed)", "INFO", "DATA_FILTERING"
+            )
+            
+            self.performance_stats['data_filtering_time'] = time.time() - filter_start
+            self.performance_stats['total_records_processed'] = len(filtered_market_data)  # Update to filtered count
+            
+            print(f"📊 Data Filtering Applied:")
+            print(f"   🔥 Original (with warmup): {len(market_data):,} records")
+            print(f"   🎯 Filtered (backtest only): {len(filtered_market_data):,} records")
+            print(f"   ⚡ Efficiency gain: {warmup_records:,} records saved ({warmup_records/len(market_data)*100:.1f}%)")
+            
+            # Phase 3: VectorBT Signal Generation (Modular) - using filtered data
             signal_start = time.time()
-            vectorbt_signals = self.signal_generator.generate_signals(market_data, indicators)
+            vectorbt_signals = self.signal_generator.generate_signals(filtered_market_data, filtered_indicators)
             self.performance_stats['signal_generation_time'] = time.time() - signal_start
             
-            # Phase 4: Entry/Exit Signal Extraction (Modular)
+            # Phase 4: Entry/Exit Signal Extraction (Modular) - using filtered data
             extraction_start = time.time()
-            trade_signals = self.signal_extractor.extract_signals(vectorbt_signals, market_data, timeframe)
+            trade_signals = self.signal_extractor.extract_signals(vectorbt_signals, filtered_market_data, timeframe)
             self.performance_stats['trade_extraction_time'] = time.time() - extraction_start
             
             # Phase 5: Options P&L Calculation (Modular)
             pnl_start = time.time()
             
-            # Extract parameters for options P&L calculation
-            close_prices = market_data['close']
-            timestamps = market_data.index
+            # Extract parameters for options P&L calculation - using filtered data
+            close_prices = filtered_market_data['close']
+            timestamps = filtered_market_data.index
             
             # Extract entry/exit signals from trade_signals
-            # Create empty boolean Series as default
-            entries = pd.Series(False, index=market_data.index, name='entries')
-            exits = pd.Series(False, index=market_data.index, name='exits')
+            # Create empty boolean Series as default - using filtered data index
+            entries = pd.Series(False, index=filtered_market_data.index, name='entries')
+            exits = pd.Series(False, index=filtered_market_data.index, name='exits')
             
             # Convert signal lists to boolean Series
             if 'entries' in trade_signals and len(trade_signals['entries']) > 0:
@@ -263,10 +309,10 @@ class UltimateEfficiencyEngine:
             )
             self.performance_stats['pnl_calculation_time'] = time.time() - pnl_start
             
-            # Phase 6: Results Compilation (Modular)
+            # Phase 6: Results Compilation (Modular) - using filtered data
             compile_start = time.time()
             results = self.results_compiler.compile_results(
-                market_data, indicators, trade_signals, options_pnl
+                filtered_market_data, filtered_indicators, trade_signals, options_pnl
             )
             self.performance_stats['results_compilation_time'] = time.time() - compile_start
             
@@ -347,7 +393,7 @@ class UltimateEfficiencyEngine:
             self.performance_stats['total_processing_time'] = total_time
             
             if total_time > 0:
-                self.performance_stats['records_per_second'] = len(market_data) / total_time
+                self.performance_stats['records_per_second'] = len(filtered_market_data) / total_time
                 baseline_speed = 1120  # records/second baseline
                 self.performance_stats['performance_multiplier'] = self.performance_stats['records_per_second'] / baseline_speed
                 self.performance_stats['target_achievement_percentage'] = (self.performance_stats['performance_multiplier'] / 5) * 100
@@ -815,6 +861,7 @@ class UltimateEfficiencyEngine:
         component_timing = {
             'data_loading': f"{stats['data_loading_time']:.3f}s",
             'indicator_calculation': f"{stats['indicator_calculation_time']:.3f}s",
+            'data_filtering': f"{stats['data_filtering_time']:.3f}s",
             'signal_generation': f"{stats['signal_generation_time']:.3f}s",
             'trade_extraction': f"{stats['trade_extraction_time']:.3f}s",
             'pnl_calculation': f"{stats['pnl_calculation_time']:.3f}s",

@@ -585,15 +585,8 @@ class ResultsExporter(ProcessorBase):
     def _add_real_indicators_to_dataframe(self, df: pd.DataFrame, raw_indicators: Dict[str, pd.Series]) -> None:
         """Add REAL technical indicators calculated during analysis to the comprehensive DataFrame."""
         try:
-            # Define mapping from indicator keys to CSV column names
-            indicator_mapping = {
-                'rsi_14': 'RSI_14',
-                'rsi_21': 'RSI_21', 
-                'sma_9': 'MA_9',
-                'sma_20': 'MA_20',
-                'sma_50': 'MA_50',
-                'sma_200': 'MA_200'
-            }
+            # Dynamically create mapping for all available indicators
+            indicator_mapping = self._create_dynamic_indicator_mapping(raw_indicators)
             
             # Initialize all indicator columns with NaN first
             for csv_column in indicator_mapping.values():
@@ -617,6 +610,59 @@ class ResultsExporter(ProcessorBase):
             
         except Exception as e:
             self.log_detailed(f"Error adding real indicators to DataFrame: {e}", "ERROR")
+    
+    def _create_dynamic_indicator_mapping(self, raw_indicators: Dict[str, pd.Series]) -> Dict[str, str]:
+        """
+        Create dynamic mapping from indicator keys to CSV column names.
+        
+        This method automatically detects all available indicators and creates 
+        appropriate CSV column names instead of using hardcoded mappings.
+        
+        Args:
+            raw_indicators: Dictionary of calculated indicators
+            
+        Returns:
+            Dictionary mapping indicator keys to CSV column names
+        """
+        try:
+            indicator_mapping = {}
+            
+            for indicator_key in raw_indicators.keys():
+                # Skip non-indicator keys (market data)
+                if indicator_key in ['close', 'open', 'high', 'low', 'volume']:
+                    continue
+                
+                # Create CSV column name based on indicator type and period
+                if '_' in indicator_key:
+                    indicator_type, period = indicator_key.split('_', 1)
+                    
+                    # Map indicator types to CSV column prefixes
+                    if indicator_type == 'rsi':
+                        csv_column = f"RSI_{period}"
+                    elif indicator_type == 'sma':
+                        csv_column = f"MA_{period}"  # Keep existing MA naming for SMA
+                    elif indicator_type == 'ema':
+                        csv_column = f"EMA_{period}"
+                    elif indicator_type == 'vwap':
+                        csv_column = f"VWAP_{period}"
+                    elif indicator_type == 'bb':
+                        csv_column = f"BB_{period}"
+                    else:
+                        # Generic naming for unknown indicators
+                        csv_column = f"{indicator_type.upper()}_{period}"
+                else:
+                    # Single indicators without periods
+                    csv_column = indicator_key.upper()
+                
+                indicator_mapping[indicator_key] = csv_column
+            
+            self.log_detailed(f"Created dynamic indicator mapping for {len(indicator_mapping)} indicators", "INFO")
+            return indicator_mapping
+            
+        except Exception as e:
+            self.log_detailed(f"Error creating dynamic indicator mapping: {e}", "ERROR")
+            # Return empty mapping on error
+            return {}
     
     def _add_signals_to_dataframe(self, df: pd.DataFrame, entries_list: List[Dict], exits_list: List[Dict]) -> None:
         """Add signal columns to the comprehensive DataFrame."""

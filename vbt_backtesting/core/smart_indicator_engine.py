@@ -28,6 +28,7 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).parent.parent))
 
 from core.json_config_loader import JSONConfigLoader, ConfigurationError
+from core.dynamic_warmup_calculator import DynamicWarmupCalculator
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -117,6 +118,9 @@ class SmartIndicatorEngine:
         # Create indicator calculation functions
         self.indicator_functions = self._create_indicator_functions()
         
+        # Initialize warmup calculator for data validation
+        self.warmup_calculator = DynamicWarmupCalculator(config_loader)
+        
         # Simplified logging - avoid duplicate messages when used in multiple components
         if not hasattr(SmartIndicatorEngine, '_initialized_count'):
             SmartIndicatorEngine._initialized_count = 0
@@ -150,6 +154,9 @@ class SmartIndicatorEngine:
         
         # Validate input data
         self._validate_input_data(data)
+        
+        # Validate data sufficiency for warmup requirements
+        self._validate_data_warmup_sufficiency(data)
         
         # Calculate all enabled indicators from config.json (simplified approach)
         calculated_indicators = {}
@@ -489,13 +496,67 @@ class SmartIndicatorEngine:
         """Get summary of indicator calculation efficiency."""
         return {
             'total_available_indicators': self.calculation_stats['total_available'],
-            'required_indicators': self.calculation_stats['required_count'],
-            'reduction_percentage': self.calculation_stats['reduction_percentage'],
-            'required_indicator_list': sorted(list(self.required_indicators)),
+            'enabled_indicators': self.calculation_stats['enabled_count'],
+            'approach': self.calculation_stats['approach'],
+            'calculation_method': self.calculation_stats['calculation_method'],
             'talib_available': TALIB_AVAILABLE,
             'vectorbt_available': VECTORBT_AVAILABLE,
             'efficiency_enabled': self.main_config['performance']['enable_smart_indicators']
         }
+    
+    def get_warmup_requirements(self, start_date: Union[str, datetime]) -> Dict[str, Any]:
+        """
+        Get warmup requirements for current indicator configuration.
+        
+        Args:
+            start_date: Desired backtest start date
+            
+        Returns:
+            Dictionary with warmup analysis and extended start date
+        """
+        return self.warmup_calculator.calculate_extended_start_date(start_date)
+    
+    def validate_data_for_backtesting(self, data_start: Union[str, datetime], 
+                                    backtest_start: Union[str, datetime]) -> Dict[str, Any]:
+        """
+        Validate if available data is sufficient for accurate backtesting.
+        
+        Args:
+            data_start: Earliest available data date
+            backtest_start: Desired backtest start date
+            
+        Returns:
+            Dictionary with validation results
+            
+        Raises:
+            ConfigurationError: If validation enabled and data insufficient
+        """
+        return self.warmup_calculator.validate_data_sufficiency(data_start, backtest_start)
+    
+    def _validate_data_warmup_sufficiency(self, data: pd.DataFrame):
+        """Validate data length meets warmup requirements."""
+        if len(data) == 0:
+            raise ConfigurationError("Cannot validate warmup with empty data")
+        
+        # Get warmup requirements
+        warmup_analysis = self.warmup_calculator.calculate_max_warmup_needed()
+        required_candles = warmup_analysis['max_warmup_candles']
+        
+        # Check if we have enough data
+        available_candles = len(data)
+        
+        if available_candles < required_candles:
+            shortage = required_candles - available_candles
+            raise ConfigurationError(
+                f"Insufficient data for indicator warmup. "
+                f"Required: {required_candles} candles, Available: {available_candles} candles. "
+                f"Shortage: {shortage} candles ({shortage / self.warmup_calculator.candles_per_day:.1f} trading days). "
+                f"Extend data loading period or reduce accuracy level."
+            )
+        
+        # Calculate confidence level
+        confidence = min(100.0, (available_candles / required_candles) * 100)
+        print(f"✅ Warmup validation passed: {confidence:.1f}% confidence ({available_candles}/{required_candles} candles)")
 
 
 # Convenience function for external use
@@ -525,25 +586,32 @@ if __name__ == "__main__":
         print("🧪 Testing Smart Indicator Engine...")
         
         # Create engine
-        engine = SmartIndicatorEngine()
+        config_dir = "config"
+        engine = create_smart_indicator_engine(config_dir)
         
         # Display summary
         summary = engine.get_calculation_summary()
         print("\n📋 Smart Indicator Engine Summary:")
         for key, value in summary.items():
-            if key == 'required_indicator_list':
-                print(f"   {key}: {', '.join(value)}")
-            else:
-                print(f"   {key}: {value}")
+            print(f"   {key}: {value}")
+        
+        # Test warmup requirements
+        print("\n🔥 Testing warmup requirements...")
+        warmup_reqs = engine.get_warmup_requirements("2025-06-01")
+        print(f"✅ Warmup requirements calculated successfully")
+        print(f"   Extended start: {warmup_reqs['extended_start_date'].strftime('%Y-%m-%d')}")
+        print(f"   Extension days: {warmup_reqs['days_extended']}")
         
         # Test with sample data
         print("\n🔧 Testing with sample data...")
+        # Create longer sample data to meet warmup requirements
+        data_length = warmup_reqs['warmup_analysis']['max_warmup_candles'] + 100
         sample_data = pd.DataFrame({
-            'open': np.random.randn(100).cumsum() + 100,
-            'high': np.random.randn(100).cumsum() + 102,
-            'low': np.random.randn(100).cumsum() + 98,
-            'close': np.random.randn(100).cumsum() + 100,
-            'volume': np.random.randint(1000, 10000, 100)
+            'open': np.random.randn(data_length).cumsum() + 100,
+            'high': np.random.randn(data_length).cumsum() + 102,
+            'low': np.random.randn(data_length).cumsum() + 98,
+            'close': np.random.randn(data_length).cumsum() + 100,
+            'volume': np.random.randint(1000, 10000, data_length)
         })
         
         # Calculate indicators
