@@ -80,11 +80,13 @@ class TradeComparator(ProcessorBase):
             self.quantman_csv_path = self.comparison_config.get('quantman_csv_path', '')
             self.tolerance_premium = self.comparison_config.get('tolerance_premium', 0.05)
             self.tolerance_time_minutes = self.comparison_config.get('tolerance_time_minutes', 15)
+            self.tolerance_pnl_percentage = self.comparison_config.get('tolerance_pnl_percentage', 5.0)
             self.export_comparison_csv = self.comparison_config.get('export_comparison_csv', True)
             
             self.log_detailed(f"QuantMan CSV path from config: '{self.quantman_csv_path}'", "INFO")
             self.log_detailed(f"Premium tolerance: {self.tolerance_premium}", "INFO")
             self.log_detailed(f"Time tolerance: {self.tolerance_time_minutes} minutes", "INFO")
+            self.log_detailed(f"P&L tolerance: {self.tolerance_pnl_percentage}%", "INFO")
             
             if not self.quantman_csv_path:
                 self.log_detailed("INITIALIZATION FAILED: quantman_csv_path is empty or missing", "ERROR")
@@ -359,6 +361,26 @@ class TradeComparator(ProcessorBase):
                     df[new_col] = pd.to_numeric(df[original_col], errors='coerce')
                     self.log_detailed(f"Extracted premiums from column: {original_col}", "DEBUG")
             
+            # Handle P&L columns (Options_PnL is the primary P&L field from VBT)
+            pnl_mapping = {
+                'Options_PnL': 'VBT_PnL',
+                'options_pnl': 'VBT_PnL',
+                'Net_PnL': 'VBT_PnL',
+                'net_pnl': 'VBT_PnL',
+                'pnl': 'VBT_PnL'
+            }
+            
+            for original_col, new_col in pnl_mapping.items():
+                if original_col in df.columns:
+                    df[new_col] = pd.to_numeric(df[original_col], errors='coerce')
+                    self.log_detailed(f"Extracted P&L from column: {original_col}", "DEBUG")
+                    break
+            
+            # If no P&L column found, log warning
+            if 'VBT_PnL' not in df.columns:
+                self.log_detailed("Warning: No P&L column found in VBT trades data", "WARNING")
+                self.log_detailed(f"Available columns: {list(df.columns)}", "DEBUG")
+            
             # Verify required columns exist
             required_columns = ['Entry_Timestamp_Parsed', 'Exit_Timestamp_Parsed', 'Strike_Price', 'Option_Type']
             missing_columns = [col for col in required_columns if col not in df.columns]
@@ -397,6 +419,9 @@ class TradeComparator(ProcessorBase):
             # Standardize premium columns
             df['Entry_Premium'] = pd.to_numeric(df['Entry Price'], errors='coerce')
             df['Exit_Premium'] = pd.to_numeric(df['Exit Price'], errors='coerce')
+            
+            # Extract P&L data (QuantMan uses 'Profit' column)
+            df['QuantMan_PnL'] = pd.to_numeric(df['Profit'], errors='coerce')
             
             return df
             
@@ -491,9 +516,16 @@ class TradeComparator(ProcessorBase):
                     'entry_premium_vbt': None,
                     'entry_premium_quantman': missing_trade.get('Entry_Premium'),
                     'entry_premium_diff': None,
+                    'entry_premium_within_tolerance': None,
                     'exit_premium_vbt': None,
                     'exit_premium_quantman': missing_trade.get('Exit_Premium'),
                     'exit_premium_diff': None,
+                    'exit_premium_within_tolerance': None,
+                    'pnl_vbt': None,
+                    'pnl_quantman': missing_trade.get('QuantMan_PnL'),
+                    'pnl_diff': None,
+                    'pnl_percentage_diff': None,
+                    'pnl_within_tolerance': None,
                     'strike_vbt': None,
                     'strike_quantman': missing_trade.get('Strike_Price'),
                     'strike_match': False,
@@ -563,6 +595,25 @@ class TradeComparator(ProcessorBase):
             entry_premium_diff = abs(vbt_trade['Entry_Premium'] - quantman_trade['Entry_Premium']) if pd.notna(vbt_trade['Entry_Premium']) and pd.notna(quantman_trade['Entry_Premium']) else None
             exit_premium_diff = abs(vbt_trade['Exit_Premium'] - quantman_trade['Exit_Premium']) if pd.notna(vbt_trade['Exit_Premium']) and pd.notna(quantman_trade['Exit_Premium']) else None
             
+            # Calculate P&L differences
+            pnl_vbt = vbt_trade.get('VBT_PnL')
+            pnl_quantman = quantman_trade.get('QuantMan_PnL')
+            
+            pnl_diff = None
+            pnl_percentage_diff = None
+            pnl_within_tolerance = None
+            
+            if pd.notna(pnl_vbt) and pd.notna(pnl_quantman):
+                pnl_diff = abs(pnl_vbt - pnl_quantman)
+                # Calculate percentage difference relative to the absolute value of QuantMan P&L
+                if abs(pnl_quantman) > 0:
+                    pnl_percentage_diff = (pnl_diff / abs(pnl_quantman)) * 100
+                    pnl_within_tolerance = pnl_percentage_diff <= self.tolerance_pnl_percentage
+                else:
+                    # If QuantMan P&L is zero, check if VBT P&L is also close to zero
+                    pnl_percentage_diff = abs(pnl_vbt) if abs(pnl_vbt) > 0 else 0
+                    pnl_within_tolerance = abs(pnl_vbt) <= 10  # Allow small absolute difference for near-zero P&L
+            
             # Time matching validation
             entry_time_diff = abs((vbt_trade['Entry_Timestamp_Parsed'] - quantman_trade['Entry_Time_Parsed']).total_seconds() / 60)
             exit_time_diff = abs((vbt_trade['Exit_Timestamp_Parsed'] - quantman_trade['Exit_Time_Parsed']).total_seconds() / 60)
@@ -585,6 +636,11 @@ class TradeComparator(ProcessorBase):
                 'exit_premium_quantman': quantman_trade.get('Exit_Premium'),
                 'exit_premium_diff': exit_premium_diff,
                 'exit_premium_within_tolerance': exit_premium_diff <= self.tolerance_premium if exit_premium_diff is not None else None,
+                'pnl_vbt': pnl_vbt,
+                'pnl_quantman': pnl_quantman,
+                'pnl_diff': pnl_diff,
+                'pnl_percentage_diff': pnl_percentage_diff,
+                'pnl_within_tolerance': pnl_within_tolerance,
                 'strike_vbt': vbt_trade.get('Strike_Price'),
                 'strike_quantman': quantman_trade.get('Strike_Price'),
                 'strike_match': vbt_trade.get('Strike_Price') == quantman_trade.get('Strike_Price'),
@@ -625,6 +681,11 @@ class TradeComparator(ProcessorBase):
             'exit_premium_quantman': quantman_trade.get('Exit_Premium') if quantman_trade is not None else None,
             'exit_premium_diff': None,
             'exit_premium_within_tolerance': None,
+            'pnl_vbt': vbt_trade.get('VBT_PnL'),
+            'pnl_quantman': quantman_trade.get('QuantMan_PnL') if quantman_trade is not None else None,
+            'pnl_diff': None,
+            'pnl_percentage_diff': None,
+            'pnl_within_tolerance': None,
             'strike_vbt': vbt_trade.get('Strike_Price'),
             'strike_quantman': quantman_trade.get('Strike_Price') if quantman_trade is not None else None,
             'strike_match': False,
@@ -641,13 +702,13 @@ class TradeComparator(ProcessorBase):
     
     def _generate_comparison_stats(self, comparison_results: List[Dict]) -> Dict:
         """
-        Generate statistical summary of trade comparison results.
+        Generate comprehensive statistical summary of trade comparison results.
         
         Args:
             comparison_results: List of comparison result dictionaries
             
         Returns:
-            Dictionary with comparison statistics
+            Dictionary with detailed comparison statistics
         """
         try:
             total_comparisons = len(comparison_results)
@@ -655,32 +716,133 @@ class TradeComparator(ProcessorBase):
             missing_in_vbt = [r for r in comparison_results if r['trade_status'] == 'MISSING_IN_VBT']
             unmatched_trades = [r for r in comparison_results if 'UNMATCHED' in r['trade_status']]
             
-            # Premium accuracy statistics for matched trades
+            # Basic accuracy counts
             entry_premium_accurate = len([r for r in matched_trades if r.get('entry_premium_within_tolerance') == True])
             exit_premium_accurate = len([r for r in matched_trades if r.get('exit_premium_within_tolerance') == True])
-            
-            # Time accuracy statistics
             entry_time_accurate = len([r for r in matched_trades if r.get('entry_time_match') == True])
             exit_time_accurate = len([r for r in matched_trades if r.get('exit_time_match') == True])
+            pnl_accurate = len([r for r in matched_trades if r.get('pnl_within_tolerance') == True])
+            pnl_comparisons = len([r for r in matched_trades if r.get('pnl_diff') is not None])
             
+            # Combined time matching (both entry AND exit match)
+            both_time_matches = len([r for r in matched_trades if r.get('entry_time_match') == True and r.get('exit_time_match') == True])
+            
+            # Premium difference statistics
+            entry_premium_diffs = [r.get('entry_premium_diff') for r in matched_trades if r.get('entry_premium_diff') is not None]
+            exit_premium_diffs = [r.get('exit_premium_diff') for r in matched_trades if r.get('exit_premium_diff') is not None]
+            
+            # P&L difference statistics  
+            pnl_diffs = [r.get('pnl_diff') for r in matched_trades if r.get('pnl_diff') is not None]
+            pnl_percentage_diffs = [r.get('pnl_percentage_diff') for r in matched_trades if r.get('pnl_percentage_diff') is not None]
+            
+            # Time difference statistics
+            entry_time_diffs = [r.get('entry_time_diff_minutes') for r in matched_trades if r.get('entry_time_diff_minutes') is not None]
+            exit_time_diffs = [r.get('exit_time_diff_minutes') for r in matched_trades if r.get('exit_time_diff_minutes') is not None]
+            
+            # Calculate statistics helper function
+            def calculate_stats(data_list):
+                if not data_list:
+                    return {'max': 0, 'min': 0, 'avg': 0, 'count': 0}
+                return {
+                    'max': max(data_list),
+                    'min': min(data_list), 
+                    'avg': sum(data_list) / len(data_list),
+                    'count': len(data_list)
+                }
+            
+            # Calculate comprehensive statistics
             stats = {
+                # Basic counts
                 'total_comparisons': total_comparisons,
+                'vbt_trades_count': len([r for r in comparison_results if r.get('vbt_trade_id') is not None]),
+                'quantman_trades_count': len(missing_in_vbt) + len(matched_trades),
                 'matched_trades': len(matched_trades),
                 'missing_in_vbt': len(missing_in_vbt),
                 'unmatched_trades': len(unmatched_trades),
+                
+                # Accuracy rates
                 'match_rate': len(matched_trades) / total_comparisons if total_comparisons > 0 else 0,
                 'entry_premium_accuracy': entry_premium_accurate / len(matched_trades) if matched_trades else 0,
                 'exit_premium_accuracy': exit_premium_accurate / len(matched_trades) if matched_trades else 0,
                 'entry_time_accuracy': entry_time_accurate / len(matched_trades) if matched_trades else 0,
-                'exit_time_accuracy': exit_time_accurate / len(matched_trades) if matched_trades else 0
+                'exit_time_accuracy': exit_time_accurate / len(matched_trades) if matched_trades else 0,
+                'both_time_matches': both_time_matches,
+                'both_time_accuracy': both_time_matches / len(matched_trades) if matched_trades else 0,
+                'pnl_accuracy': pnl_accurate / pnl_comparisons if pnl_comparisons > 0 else 0,
+                'pnl_comparisons_available': pnl_comparisons,
+                
+                # Premium difference statistics
+                'entry_premium_stats': calculate_stats(entry_premium_diffs),
+                'exit_premium_stats': calculate_stats(exit_premium_diffs),
+                
+                # P&L difference statistics
+                'pnl_diff_stats': calculate_stats(pnl_diffs),
+                'pnl_percentage_stats': calculate_stats(pnl_percentage_diffs),
+                
+                # Time difference statistics
+                'entry_time_diff_stats': calculate_stats(entry_time_diffs),
+                'exit_time_diff_stats': calculate_stats(exit_time_diffs),
+                
+                # Quality grades
+                'overall_grade': self._calculate_comparison_grade(len(matched_trades), total_comparisons, 
+                                                               entry_premium_accurate + exit_premium_accurate,
+                                                               len(matched_trades) * 2, pnl_accurate, pnl_comparisons),
+                
+                # Additional insights
+                'perfect_matches': len([r for r in matched_trades if 
+                                     r.get('entry_time_match') == True and r.get('exit_time_match') == True and
+                                     r.get('entry_premium_within_tolerance') == True and r.get('exit_premium_within_tolerance') == True and
+                                     r.get('pnl_within_tolerance') == True]),
+                'tolerance_settings': {
+                    'premium_tolerance': self.tolerance_premium,
+                    'time_tolerance_minutes': self.tolerance_time_minutes,
+                    'pnl_tolerance_percentage': self.tolerance_pnl_percentage
+                }
             }
             
-            self.log_detailed(f"Comparison Stats: {stats}", "INFO")
+            self.log_detailed(f"Comprehensive Comparison Stats Generated: {len(stats)} metrics", "INFO")
             return stats
             
         except Exception as e:
             self.log_detailed(f"Error generating comparison stats: {e}", "ERROR")
             return {}
+    
+    def _calculate_comparison_grade(self, matched_count: int, total_count: int, 
+                                  premium_accurate: int, premium_total: int,
+                                  pnl_accurate: int, pnl_total: int) -> str:
+        """Calculate overall comparison grade based on various accuracy metrics."""
+        try:
+            if total_count == 0:
+                return "N/A"
+                
+            match_rate = matched_count / total_count
+            premium_accuracy = premium_accurate / premium_total if premium_total > 0 else 0
+            pnl_accuracy = pnl_accurate / pnl_total if pnl_total > 0 else 0
+            
+            # Weighted scoring: 40% match rate, 30% premium accuracy, 30% P&L accuracy
+            overall_score = (match_rate * 0.4) + (premium_accuracy * 0.3) + (pnl_accuracy * 0.3)
+            
+            if overall_score >= 0.95:
+                return "A+ (Outstanding)"
+            elif overall_score >= 0.90:
+                return "A (Excellent)"
+            elif overall_score >= 0.85:
+                return "A- (Very Good)"
+            elif overall_score >= 0.80:
+                return "B+ (Good)"
+            elif overall_score >= 0.75:
+                return "B (Above Average)"
+            elif overall_score >= 0.70:
+                return "B- (Average)"
+            elif overall_score >= 0.60:
+                return "C (Below Average)"
+            elif overall_score >= 0.50:
+                return "D (Poor)"
+            else:
+                return "F (Very Poor)"
+                
+        except Exception:
+            return "N/A"
     
     def export_comparison_csv(self, comparison_data: Dict, filename_base: str) -> Optional[str]:
         """

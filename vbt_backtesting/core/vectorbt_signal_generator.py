@@ -23,6 +23,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional, Union
 from datetime import datetime, time as dt_time
+from datetime import timedelta
 import warnings
 
 # Add parent directory to path for imports
@@ -43,29 +44,75 @@ except ImportError:
     raise ConfigurationError("VectorBT not available. Install with: pip install vectorbt[full]")
 
 
-def create_time_masks(timestamps: pd.Index) -> Tuple[np.ndarray, np.ndarray]:
+def create_time_masks(timestamps: pd.Index, config_loader=None) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Create time masks for trading hours validation and forced exits.
+    Create time masks for trading hours validation and forced exits using config.json settings.
     
     Args:
         timestamps: DataFrame index with datetime timestamps
+        config_loader: Configuration loader instance (optional for backward compatibility)
         
     Returns:
         Tuple of (trading_hours_mask, forced_exit_mask)
     """
     try:
-        # Define trading hours (IST)
-        trading_start = dt_time(9, 20)  # 09:20 AM
-        trading_end = dt_time(15, 0)    # 03:00 PM
-        forced_exit_time = dt_time(15, 15)  # 03:15 PM
+        # Default hardcoded values (fallback)
+        default_trading_start = dt_time(9, 15)
+        default_trading_end = dt_time(14, 55)
+        default_forced_exit = dt_time(14, 55)
+        
+        # Use config values if available
+        if config_loader:
+            risk_config = config_loader.main_config.get('risk_management', {})
+            trading_config = config_loader.main_config.get('trading', {})
+            
+            # Get timeframe for adjustment (subtract from config times)
+            timeframe = trading_config.get('timeframe', '5m')
+            if timeframe.endswith('m'):
+                timeframe_minutes = int(timeframe[:-1])
+            else:
+                timeframe_minutes = 5 # Default to 1 minute
+            
+            # Get configured times and subtract timeframe minutes
+            trading_start_str = risk_config.get('trading_start_time', '09:20')
+            trading_end_str = risk_config.get('trading_end_time', '15:00')
+            forced_exit_str = risk_config.get('forced_exit_time', '15:00')
+            
+            # Parse and subtract timeframe minutes from config times for better signal generation
+            def subtract_minutes_from_time(time_str, minutes_to_subtract):
+                hour, minute = map(int, time_str.split(':'))
+                # Convert to total minutes, subtract, then convert back
+                total_minutes = hour * 60 + minute - minutes_to_subtract
+                # Handle negative values (wrap to previous day if needed)
+                if total_minutes < 0:
+                    total_minutes = 0  # Clamp to midnight
+                new_hour = total_minutes // 60
+                new_minute = total_minutes % 60
+                return dt_time(new_hour, new_minute)
+            
+            # Apply subtraction to all config times
+            trading_start = subtract_minutes_from_time(trading_start_str, timeframe_minutes)
+            trading_end = subtract_minutes_from_time(trading_end_str, timeframe_minutes)
+            forced_exit_time = subtract_minutes_from_time(forced_exit_str, timeframe_minutes)
+            
+            print(f"📅 Using config times (subtracted {timeframe_minutes}m for {timeframe}):")
+            print(f"   Trading Start: {trading_start_str} - {timeframe_minutes}m → {trading_start}")
+            print(f"   Trading End: {trading_end_str} - {timeframe_minutes}m → {trading_end}")
+            print(f"   Forced Exit: {forced_exit_str} - {timeframe_minutes}m → {forced_exit_time}")
+        else:
+            # Use defaults if no config
+            trading_start = default_trading_start
+            trading_end = default_trading_end
+            forced_exit_time = default_forced_exit
+            print(f"⚠️ Using default hardcoded times (no config provided)")
         
         # Extract time from timestamps
         times = pd.to_datetime(timestamps).time
         
-        # Trading hours mask (09:20 - 15:00)
+        # Trading hours mask
         trading_hours_mask = (times >= trading_start) & (times <= trading_end)
         
-        # Forced exit mask (15:15)
+        # Forced exit mask
         forced_exit_mask = (times == forced_exit_time)
         
         # Convert to numpy arrays properly
@@ -79,6 +126,8 @@ def create_time_masks(timestamps: pd.Index) -> Tuple[np.ndarray, np.ndarray]:
         # Fallback to all True for trading hours, all False for forced exits
         n = len(timestamps)
         return np.ones(n, dtype=bool), np.zeros(n, dtype=bool)
+
+
 
 
 def vectorized_position_tracking(entry_conditions: np.ndarray, 
@@ -101,10 +150,10 @@ def vectorized_position_tracking(entry_conditions: np.ndarray,
         n = len(entry_conditions)
         signals = np.zeros(n, dtype=int)
         
-        # Filter entries by trading hours (09:20-15:00)
+        # Filter entries by trading hours (config-based)
         valid_entries = entry_conditions & trading_hours_mask
         
-        # Combine natural exits with forced exits at 15:15
+        # Combine natural exits with forced exits (config-based)
         all_exits = exit_conditions | forced_exit_mask
         
         # CRITICAL: Sequential position state tracking for multiple entries
@@ -296,7 +345,7 @@ class VectorBTSignalGenerator(ProcessorBase):
                 exit_signals = pd.Series(False, index=market_data.index)
             
             # APPLY VECTORIZED POSITION TRACKING (Key improvement from working system)
-            trading_hours_mask, forced_exit_mask = create_time_masks(market_data.index)
+            trading_hours_mask, forced_exit_mask = create_time_masks(market_data.index, self.config_loader)
             
             # Generate proper signals using vectorized position tracking
             position_signals = vectorized_position_tracking(

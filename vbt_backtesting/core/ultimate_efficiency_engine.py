@@ -282,12 +282,20 @@ class UltimateEfficiencyEngine:
                 self.selective_logger.log_detailed(f"Options P&L keys available: {list(options_pnl.keys())}", "DEBUG")
                 
                 # Extract trades data from options_pnl for comparison
-                # The correct key is 'trades_data' based on options_pnl_calculator.py analysis
-                trades_data = options_pnl.get('trades_data', [])
-                self.selective_logger.log_detailed(f"Raw trades_data from P&L: {type(trades_data)}, length: {len(trades_data) if trades_data else 'None'}", "DEBUG")
+                # Use the enriched trades data from results_exporter instead of raw trades_data
+                # to get P&L calculations included
+                raw_trades_data = options_pnl.get('trades_data', [])
+                self.selective_logger.log_detailed(f"Raw trades_data from P&L: {type(raw_trades_data)}, length: {len(raw_trades_data) if raw_trades_data else 'None'}", "DEBUG")
                 
-                if trades_data and len(trades_data) > 0:
-                    self.selective_logger.log_detailed(f"Sample trade from trades_data: {trades_data[0]}", "DEBUG")
+                # Get enriched trades data with P&L calculations from results_exporter
+                if raw_trades_data:
+                    trades_data = self.results_exporter._create_enriched_trades_data(raw_trades_data)
+                    self.selective_logger.log_detailed(f"Enriched trades_data with P&L: {type(trades_data)}, length: {len(trades_data) if trades_data else 'None'}", "DEBUG")
+                    
+                    if trades_data and len(trades_data) > 0:
+                        self.selective_logger.log_detailed(f"Sample enriched trade: {trades_data[0]}", "DEBUG")
+                else:
+                    trades_data = []
                 
                 # Try alternative keys if trades_data is not found
                 if not trades_data:
@@ -349,6 +357,10 @@ class UltimateEfficiencyEngine:
             
             # Display portfolio analytics
             self.display_portfolio_summary(options_pnl)
+            
+            # Display trade comparison analytics summary if enabled and available
+            if self.trade_comparator.enabled and trade_comparison_results:
+                self.display_trade_comparison_summary(trade_comparison_results)
             
             # Log final performance
             final_performance = {
@@ -611,6 +623,181 @@ class UltimateEfficiencyEngine:
         except Exception as e:
             self.selective_logger.log_detailed(f"Error displaying portfolio summary: {e}", "WARNING", "SYSTEM")
             print(f"❌ Error displaying portfolio summary: {e}")
+    
+    def display_trade_comparison_summary(self, trade_comparison_results: Dict[str, Any]) -> None:
+        """Display comprehensive trade comparison analytics summary in console format."""
+        try:
+            print(f"\n{'=' * 80}")
+            print(f"🔍 TRADE COMPARISON ANALYTICS SUMMARY - VBT vs QUANTMAN")
+            print(f"{'=' * 80}")
+            
+            # Extract comparison statistics
+            comparison_stats = trade_comparison_results.get('comparison_stats', {})
+            if not comparison_stats:
+                print(f"⚠️  NO COMPARISON STATISTICS AVAILABLE")
+                print(f"{'=' * 80}")
+                return
+            
+            # Basic trade counts
+            vbt_trades_count = comparison_stats.get('vbt_trades_count', 0)
+            quantman_trades_count = comparison_stats.get('quantman_trades_count', 0)
+            matched_trades = comparison_stats.get('matched_trades', 0)
+            missing_in_vbt = comparison_stats.get('missing_in_vbt', 0)
+            unmatched_trades = comparison_stats.get('unmatched_trades', 0)
+            
+            # Time matching statistics
+            both_time_matches = comparison_stats.get('both_time_matches', 0)
+            entry_time_accuracy = comparison_stats.get('entry_time_accuracy', 0) * 100
+            exit_time_accuracy = comparison_stats.get('exit_time_accuracy', 0) * 100
+            both_time_accuracy = comparison_stats.get('both_time_accuracy', 0) * 100
+            
+            # Premium difference statistics
+            entry_premium_stats = comparison_stats.get('entry_premium_stats', {})
+            exit_premium_stats = comparison_stats.get('exit_premium_stats', {})
+            entry_premium_accuracy = comparison_stats.get('entry_premium_accuracy', 0) * 100
+            exit_premium_accuracy = comparison_stats.get('exit_premium_accuracy', 0) * 100
+            
+            # P&L difference statistics
+            pnl_diff_stats = comparison_stats.get('pnl_diff_stats', {})
+            pnl_percentage_stats = comparison_stats.get('pnl_percentage_stats', {})
+            pnl_accuracy = comparison_stats.get('pnl_accuracy', 0) * 100
+            pnl_comparisons_available = comparison_stats.get('pnl_comparisons_available', 0)
+            
+            # Quality metrics
+            overall_grade = comparison_stats.get('overall_grade', 'N/A')
+            perfect_matches = comparison_stats.get('perfect_matches', 0)
+            match_rate = comparison_stats.get('match_rate', 0) * 100
+            
+            # Tolerance settings
+            tolerance_settings = comparison_stats.get('tolerance_settings', {})
+            premium_tolerance = tolerance_settings.get('premium_tolerance', 0)
+            time_tolerance = tolerance_settings.get('time_tolerance_minutes', 0)
+            pnl_tolerance = tolerance_settings.get('pnl_tolerance_percentage', 0)
+            
+            print(f"📊 COMPARISON PERIOD: {self.main_config['backtesting']['start_date']} to {self.main_config['backtesting']['end_date']}")
+            print()
+            
+            # Display Trade Count Summary
+            print(f"📈 TRADE COUNT SUMMARY:")
+            print(f"   Total VBT Trades          :          {vbt_trades_count:>3}")
+            print(f"   Total QuantMan Trades     :          {quantman_trades_count:>3}")
+            print(f"   Matched Trades            :          {matched_trades:>3}")
+            print(f"   Missing from VBT          :          {missing_in_vbt:>3}")
+            print(f"   Unmatched Trades          :          {unmatched_trades:>3}")
+            print(f"   Match Rate                :         {match_rate:>5.1f}%")
+            print()
+            
+            # Display Time Matching Analysis
+            print(f"⏰ TIME MATCHING ANALYSIS:")
+            print(f"   Entry Time Matches        :         {entry_time_accuracy:>5.1f}%")
+            print(f"   Exit Time Matches         :         {exit_time_accuracy:>5.1f}%")
+            print(f"   Both Entry & Exit Match   :          {both_time_matches:>3} ({both_time_accuracy:>5.1f}%)")
+            print(f"   Time Tolerance            :          {time_tolerance:>3} minutes")
+            print()
+            
+            # Display Premium Difference Statistics
+            print(f"💰 PREMIUM DIFFERENCE STATISTICS:")
+            if entry_premium_stats.get('count', 0) > 0:
+                # Calculate accuracy based on max difference (lower max diff = higher accuracy)
+                entry_max_diff = entry_premium_stats.get('max', 0)
+                entry_accuracy_from_max = max(0, (1 - min(entry_max_diff / 100, 1)) * 100)  # Scale: 0-100 max diff = 100-0% accuracy
+                print(f"   Entry Premium Accuracy    :         {entry_accuracy_from_max:>5.1f}%")
+                print(f"   Entry Premium Max Diff    : ₹       {entry_max_diff:>6.2f}")
+                print(f"   Entry Premium Avg Diff    : ₹       {entry_premium_stats.get('avg', 0):>6.2f}")
+            else:
+                print(f"   Entry Premium Accuracy    :         N/A (No data)")
+                print(f"   Entry Premium Differences :         N/A (No data)")
+            
+            if exit_premium_stats.get('count', 0) > 0:
+                # Calculate accuracy based on max difference (lower max diff = higher accuracy)
+                exit_max_diff = exit_premium_stats.get('max', 0)
+                exit_accuracy_from_max = max(0, (1 - min(exit_max_diff / 100, 1)) * 100)  # Scale: 0-100 max diff = 100-0% accuracy
+                print(f"   Exit Premium Accuracy     :         {exit_accuracy_from_max:>5.1f}%")
+                print(f"   Exit Premium Max Diff     : ₹       {exit_max_diff:>6.2f}")
+                print(f"   Exit Premium Avg Diff     : ₹       {exit_premium_stats.get('avg', 0):>6.2f}")
+            else:
+                print(f"   Exit Premium Accuracy     :         N/A (No data)")
+                print(f"   Exit Premium Differences  :         N/A (No data)")
+            
+            print(f"   Premium Tolerance         : ₹       {premium_tolerance:>6.2f}")
+            print()
+            
+            # Display P&L Difference Statistics
+            print(f"💼 P&L DIFFERENCE STATISTICS:")
+            if pnl_comparisons_available > 0:
+                print(f"   P&L Comparisons Available :          {pnl_comparisons_available:>3}")
+                
+                # Use existing tolerance-based accuracy (more meaningful than custom scale)
+                print(f"   P&L Accuracy              :         {pnl_accuracy:>5.1f}%")
+                
+                # Display absolute P&L differences (same format as premiums)
+                if pnl_diff_stats.get('count', 0) > 0:
+                    pnl_max_diff = pnl_diff_stats.get('max', 0)
+                    print(f"   P&L Max Difference        : ₹   {pnl_max_diff:>10,.2f}")
+                    print(f"   P&L Avg Difference        : ₹   {pnl_diff_stats.get('avg', 0):>10,.2f}")
+                else:
+                    print(f"   P&L Differences           :         N/A (No data)")
+            else:
+                print(f"   P&L Comparisons Available :           0 (No P&L data)")
+                print(f"   P&L Accuracy              :         N/A")
+                print(f"   P&L Differences           :         N/A (No data)")
+            
+            print(f"   P&L Tolerance             :         {pnl_tolerance:>5.1f}%")
+            print()
+            
+            # Display Quality Assessment
+            print(f"🏆 QUALITY ASSESSMENT:")
+            print(f"   Perfect Matches           :          {perfect_matches:>3}")
+            if matched_trades > 0:
+                perfect_match_rate = (perfect_matches / matched_trades) * 100
+                print(f"   Perfect Match Rate        :         {perfect_match_rate:>5.1f}%")
+            else:
+                print(f"   Perfect Match Rate        :         N/A")
+            print(f"   Overall Comparison Grade  :         {overall_grade}")
+            print()
+            
+            # Display Recommendations
+            print(f"💡 RECOMMENDATIONS:")
+            
+            # Calculate updated accuracy values for recommendations
+            entry_accuracy_calc = 0
+            exit_accuracy_calc = 0
+            
+            if entry_premium_stats.get('count', 0) > 0:
+                entry_max_diff = entry_premium_stats.get('max', 0)
+                entry_accuracy_calc = max(0, (1 - min(entry_max_diff / 100, 1)) * 100)
+            
+            if exit_premium_stats.get('count', 0) > 0:
+                exit_max_diff = exit_premium_stats.get('max', 0)
+                exit_accuracy_calc = max(0, (1 - min(exit_max_diff / 100, 1)) * 100)
+            
+            # Use existing tolerance-based P&L accuracy (already calculated)
+            pnl_accuracy_calc = pnl_accuracy
+            
+            if match_rate < 80:
+                print(f"   • Low match rate ({match_rate:.1f}%) - Review strategy alignment")
+            if both_time_accuracy < 70:
+                print(f"   • Time matching needs improvement ({both_time_accuracy:.1f}%)")
+            if pnl_accuracy_calc < 80 and pnl_comparisons_available > 0:
+                print(f"   • P&L accuracy needs attention ({pnl_accuracy_calc:.1f}%)")
+            if entry_accuracy_calc < 85 and entry_premium_stats.get('count', 0) > 0:
+                print(f"   • Entry premium accuracy could be improved ({entry_accuracy_calc:.1f}%)")
+            if exit_accuracy_calc < 85 and exit_premium_stats.get('count', 0) > 0:
+                print(f"   • Exit premium accuracy could be improved ({exit_accuracy_calc:.1f}%)")
+            
+            if (match_rate >= 80 and both_time_accuracy >= 70 and 
+                (pnl_accuracy_calc >= 80 or pnl_comparisons_available == 0) and
+                (entry_accuracy_calc >= 85 or entry_premium_stats.get('count', 0) == 0) and
+                (exit_accuracy_calc >= 85 or exit_premium_stats.get('count', 0) == 0)):
+                print(f"   • [SUCCESS] Excellent comparison results across all metrics!")
+            print()
+            
+            print(f"🎯 COMPARISON GRADE: {overall_grade}")
+            print(f"{'=' * 80}")
+            
+        except Exception as e:
+            self.selective_logger.log_detailed(f"Error displaying trade comparison summary: {e}", "WARNING", "SYSTEM")
+            print(f"❌ Error displaying trade comparison summary: {e}")
     
     def _display_performance_summary(self) -> None:
         """Display comprehensive performance summary using selective logging."""

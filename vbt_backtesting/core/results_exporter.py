@@ -256,6 +256,76 @@ class ResultsExporter(ProcessorBase):
             self.log_detailed(f"Error exporting signals CSV: {e}", "ERROR")
             return None
     
+    def _create_enriched_trades_data(self, raw_trades_data: List[Dict]) -> List[Dict]:
+        """
+        Create enriched trades data with P&L calculations for trade comparison.
+        
+        Args:
+            raw_trades_data: Raw trades data from P&L calculator
+            
+        Returns:
+            List of enriched trade dictionaries with P&L calculations
+        """
+        try:
+            # Get configuration data for calculations
+            config_data = self.main_config.get('options', {})
+            trading_config = self.main_config.get('trading', {})
+            default_option_type = config_data.get('default_option_type', 'CALL')
+            commission_per_trade = trading_config.get('commission_per_trade', 20.0)
+            lot_size = trading_config.get('lot_size', 75)
+            
+            enriched_trades = []
+            
+            for i, trade_data in enumerate(raw_trades_data):
+                try:
+                    # Extract trade information
+                    entry_timestamp = trade_data.get('entry_timestamp')
+                    exit_timestamp = trade_data.get('exit_timestamp')
+                    entry_premium = float(trade_data.get('entry_premium', 0.0))
+                    exit_premium = float(trade_data.get('exit_premium', 0.0))
+                    strike_price = int(trade_data.get('entry_strike', trade_data.get('strike', 0)))
+                    option_type = str(trade_data.get('option_type', default_option_type))
+                    strategy_name = str(trade_data.get('group', ''))
+                    case_name = str(trade_data.get('case', ''))
+                    position_size = int(trade_data.get('position_size', 1))
+                    
+                    # Calculate P&L with correct options logic
+                    options_pnl_value = (exit_premium - entry_premium) * lot_size * position_size
+                    net_pnl = options_pnl_value - commission_per_trade
+                    
+                    # Create enriched trade record (combining original data with P&L calculations)
+                    enriched_trade = dict(trade_data)  # Start with original data
+                    enriched_trade.update({
+                        'Trade_ID': i + 1,
+                        'Strategy_Name': strategy_name,
+                        'Case_Name': case_name,
+                        'Position_Size': position_size,
+                        'Entry_Timestamp': entry_timestamp,
+                        'Entry_Strike': strike_price,
+                        'Entry_Premium': entry_premium,
+                        'Exit_Timestamp': exit_timestamp,
+                        'Exit_Strike': strike_price,
+                        'Exit_Premium': exit_premium,
+                        'Option_Type': option_type,
+                        'Options_PnL': options_pnl_value,
+                        'Commission': commission_per_trade,
+                        'Net_PnL': net_pnl,
+                        'Lot_Size': lot_size
+                    })
+                    
+                    enriched_trades.append(enriched_trade)
+                    
+                except Exception as e:
+                    self.log_detailed(f"Error enriching trade {i}: {e}", "WARNING")
+                    continue
+                    
+            self.log_detailed(f"Created {len(enriched_trades)} enriched trades with P&L calculations", "DEBUG")
+            return enriched_trades
+            
+        except Exception as e:
+            self.log_detailed(f"Error creating enriched trades data: {e}", "ERROR")
+            return []
+    
     def _export_trades_csv(self, results: Dict[str, Any], output_dir: Path, filename_base: str) -> Optional[Path]:
         """
         Export pure trade data CSV with premiums and P&L calculations.
@@ -952,10 +1022,13 @@ class ResultsExporter(ProcessorBase):
                 'entry_premium_vbt', 'entry_premium_quantman', 'entry_premium_diff', 'entry_premium_within_tolerance',
                 'exit_premium_vbt', 'exit_premium_quantman', 'exit_premium_diff', 'exit_premium_within_tolerance',
                 
-                # 4. OPTION TYPE COMPARISON
+                # 4. P&L COMPARISONS
+                'pnl_vbt', 'pnl_quantman', 'pnl_diff', 'pnl_percentage_diff', 'pnl_within_tolerance',
+                
+                # 5. OPTION TYPE COMPARISON
                 'option_type_vbt', 'option_type_quantman', 'option_type_match',
                 
-                # 5. TRADE IDENTIFICATION (Last)
+                # 6. TRADE IDENTIFICATION (Last)
                 'trade_status', 'vbt_trade_id', 'quantman_transaction'
             ]
             
