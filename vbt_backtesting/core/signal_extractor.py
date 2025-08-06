@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional, Union
 from datetime import datetime, timedelta
 import warnings
+from collections import defaultdict
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -91,6 +92,18 @@ class SignalExtractor(ProcessorBase):
                     'trade_pairs': []
                 }
                 
+                # RISK MANAGEMENT: Initialize daily entry counter per strategy
+                # Format: daily_entry_counts[date][strategy_group] = count
+                daily_entry_counts = defaultdict(lambda: defaultdict(int))
+                
+                # Get max daily entries from risk management config
+                max_daily_entries = self.config_loader.main_config.get(
+                    'risk_management', {}
+                ).get('max_daily_entries', 3)
+                
+                self.log_detailed(f"Risk Management: Max daily entries per strategy = {max_daily_entries}", "INFO", "RISK_MANAGEMENT")
+                print(f"🛡️ Risk Management: Max {max_daily_entries} entries per strategy per day")
+                
                 # Group cases by strategy for proper portfolio creation
                 strategy_groups = {}
                 for strategy_key, signal_data in vectorbt_signals.items():
@@ -152,9 +165,11 @@ class SignalExtractor(ProcessorBase):
                             group_data['total_exit_signals'] += exit_count
                             
                             # Store individual entry/exit signals with timeframe for timestamp adjustment
+                            # RISK MANAGEMENT: Pass daily entry counters for strategy-wise limits
                             self._store_individual_signals(
                                 trade_signals, entries, exits, market_data, 
-                                group_name, case_name, case_signals, timeframe
+                                group_name, case_name, case_signals, timeframe,
+                                daily_entry_counts, max_daily_entries
                             )
                     
                     # Create strategy-level combined signals
@@ -185,6 +200,18 @@ class SignalExtractor(ProcessorBase):
                     "SIGNAL_EXTRACTION"
                 )
                 
+                # RISK MANAGEMENT: Display daily limit summary
+                total_dates = len(daily_entry_counts)
+                print(f"🛡️ Risk Management Daily Limits Summary:")
+                if total_dates > 0:
+                    for signal_date, strategy_counts in sorted(daily_entry_counts.items()):
+                        print(f"   📅 {signal_date}:")
+                        for strategy_name, count in strategy_counts.items():
+                            status = "AT LIMIT" if count >= max_daily_entries else f"{count}/{max_daily_entries}"
+                            print(f"      {strategy_name}: {status}")
+                else:
+                    print(f"   No entries generated (no daily limits applied)")
+                
                 print(f"Strategy-Level Entry/Exit extraction complete:")
                 print(f"   Strategy Groups Processed: {len(strategy_groups)}")
                 print(f"   Total entry signals: {len(trade_signals['entries'])}")
@@ -208,7 +235,9 @@ class SignalExtractor(ProcessorBase):
         group_name: str,
         case_name: str,
         case_signals: Dict[str, Any],
-        timeframe: str
+        timeframe: str,
+        daily_entry_counts: defaultdict,
+        max_daily_entries: int
     ) -> None:
         """OPTIMIZATION: Store individual entry/exit signals with PRE-CALCULATED STRIKES."""
         try:
@@ -230,15 +259,42 @@ class SignalExtractor(ProcessorBase):
             else:
                 entry_indices = np.where(entries)[0]
                 
+            # RISK MANAGEMENT: Track entries processed and filtered
+            entries_processed = 0
+            entries_filtered = 0
+            
             for idx in entry_indices:
+                entries_processed += 1
                 underlying_price = prices.iloc[idx]
-                
-                # KEY OPTIMIZATION: Calculate strike during signal extraction (not P&L phase)
-                entry_strike = self._calculate_strike_for_strategy(underlying_price, strike_type, option_type)
                 
                 # CRITICAL: Adjust timestamp to reflect when signal is actually available
                 signal_timestamp = self._adjust_signal_timestamp(timestamps[idx], timeframe)
                 
+                # RISK MANAGEMENT: Check daily entry limit per strategy
+                signal_date = signal_timestamp.date()  # Extract date from adjusted timestamp
+                current_daily_count = daily_entry_counts[signal_date][group_name]
+                
+                if current_daily_count >= max_daily_entries:
+                    entries_filtered += 1
+                    # Log first few filtered signals for debugging
+                    if entries_filtered <= 3:
+                        self.log_detailed(
+                            f"Daily limit reached: {group_name} has {current_daily_count}/{max_daily_entries} entries on {signal_date}. "
+                            f"Skipping signal at {signal_timestamp}",
+                            "INFO", "RISK_MANAGEMENT"
+                        )
+                    continue  # Skip this signal - daily limit reached for this strategy
+                
+                # RISK MANAGEMENT: Increment daily counter for this strategy FIRST
+                daily_entry_counts[signal_date][group_name] += 1
+                
+                # TRADE TRACKING: Capture daily sequence number for Trade1/Trade2/Trade3 tracking
+                daily_trade_sequence = daily_entry_counts[signal_date][group_name]
+                
+                # KEY OPTIMIZATION: Calculate strike during signal extraction (not P&L phase)
+                entry_strike = self._calculate_strike_for_strategy(underlying_price, strike_type, option_type)
+                
+                # Store the entry signal (passed daily limit check)
                 trade_signals['entries'].append({
                     'index': idx,
                     'timestamp': signal_timestamp,  # ADJUSTED: Next candle start time
@@ -248,7 +304,8 @@ class SignalExtractor(ProcessorBase):
                     'option_type': option_type,
                     'position_size': position_size,
                     'strike': entry_strike,  # PRE-CALCULATED STRIKE
-                    'strike_type': strike_type
+                    'strike_type': strike_type,
+                    'daily_trade_sequence': daily_trade_sequence  # TRADE TRACKING: 1, 2, or 3
                 })
             
             # Process exit signals with SAME STRIKES (for matching)
@@ -278,6 +335,16 @@ class SignalExtractor(ProcessorBase):
                     'strike': exit_strike,  # Will be overridden during trade pairing
                     'strike_type': strike_type
                 })
+            
+            # RISK MANAGEMENT: Log filtering results for this case
+            entries_accepted = entries_processed - entries_filtered
+            if entries_filtered > 0:
+                print(f"     🛡️ Risk Management ({group_name}.{case_name}): {entries_processed} signals → {entries_accepted} accepted, {entries_filtered} filtered (daily limit)")
+                self.log_detailed(
+                    f"Daily limit filtering: {group_name}.{case_name} - {entries_processed} signals processed, "
+                    f"{entries_accepted} accepted, {entries_filtered} filtered by daily limit",
+                    "INFO", "RISK_MANAGEMENT"
+                )
                 
         except Exception as e:
             self.log_detailed(f"Error storing individual signals: {e}", "ERROR")
@@ -467,6 +534,7 @@ class SignalExtractor(ProcessorBase):
                             # 🚀 CRITICAL OPTIMIZATION: Use SAME STRIKE for entry and exit
                             entry_strike = entry.get('strike', int(round(entry['price'] / 50) * 50))
                             
+                            seq_num = entry.get('daily_trade_sequence', 0)
                             trade_pairs.append({
                                 'entry': entry,
                                 'exit': exit,
@@ -484,7 +552,8 @@ class SignalExtractor(ProcessorBase):
                                 'entry_strike': entry_strike,     # 🚀 PRE-CALCULATED STRIKE
                                 'exit_strike': entry_strike,      # 🚀 SAME STRIKE FOR EXIT
                                 'strike_type': entry.get('strike_type', 'ATM'),
-                                'position_size': entry.get('position_size', 1)
+                                'position_size': entry.get('position_size', 1),
+                                'daily_trade_sequence': seq_num  # TRADE TRACKING
                             })
                             entry_idx += 1
                             exit_idx += 1

@@ -391,7 +391,8 @@ class OptionsPnLCalculator(ProcessorBase):
                     'position_size': trade_pair.get('position_size', 1),
                     'strike_type': trade_pair.get('strike_type', 'ATM'),
                     'group': trade_pair.get('group'),
-                    'case': trade_pair.get('case')
+                    'case': trade_pair.get('case'),
+                    'daily_trade_sequence': trade_pair.get('daily_trade_sequence', 0)  # TRADE TRACKING
                 }
                 trades_data.append(trade)
             

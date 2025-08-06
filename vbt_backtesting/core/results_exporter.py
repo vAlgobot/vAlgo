@@ -293,10 +293,14 @@ class ResultsExporter(ProcessorBase):
                     options_pnl_value = (exit_premium - entry_premium) * lot_size * position_size
                     net_pnl = options_pnl_value - commission_per_trade
                     
+                    # Extract daily trade sequence for Trade1/Trade2/Trade3 tracking
+                    daily_trade_sequence = trade_data.get('daily_trade_sequence', 0)
+                    
                     # Create enriched trade record (combining original data with P&L calculations)
                     enriched_trade = dict(trade_data)  # Start with original data
                     enriched_trade.update({
                         'Trade_ID': i + 1,
+                        'Daily_Trade_Number': daily_trade_sequence,  # TRADE TRACKING: 1, 2, or 3
                         'Strategy_Name': strategy_name,
                         'Case_Name': case_name,
                         'Position_Size': position_size,
@@ -385,9 +389,13 @@ class ResultsExporter(ProcessorBase):
                     options_pnl_value = (exit_premium - entry_premium) * lot_size * position_size
                     net_pnl = options_pnl_value - commission_per_trade
                     
+                    # Extract daily trade sequence for Trade1/Trade2/Trade3 tracking
+                    daily_trade_sequence = trade_data.get('daily_trade_sequence', 0)
+                    
                     # Create clean trade record
                     trade_record = {
                         'Trade_ID': i + 1,
+                        'Daily_Trade_Number': daily_trade_sequence,  # TRADE TRACKING: 1, 2, or 3
                         'Strategy_Name': strategy_name,
                         'Case_Name': case_name,
                         'Position_Size': position_size,
