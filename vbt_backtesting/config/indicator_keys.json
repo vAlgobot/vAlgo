@@ -1,9 +1,9 @@
 {
   "metadata": {
-    "generated_at": "2025-08-05T20:42:15.276980",
+    "generated_at": "2025-08-06T11:57:19.059840",
     "version": "1.0",
     "approach": "config_based_simple",
-    "total_keys": 13,
+    "total_keys": 31,
     "source": "config.json enabled indicators"
   },
   "market_data_keys": {
@@ -21,7 +21,25 @@
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
     "ema_9": "EMA with 9 period",
-    "ema_20": "EMA with 20 period"
+    "ema_20": "EMA with 20 period",
+    "ema_50": "EMA with 50 period",
+    "ema_200": "EMA with 200 period",
+    "cpr_pivot": "CPR PIVOT",
+    "cpr_tc": "CPR TC",
+    "cpr_bc": "CPR BC",
+    "cpr_r1": "CPR R1",
+    "cpr_r2": "CPR R2",
+    "cpr_r3": "CPR R3",
+    "cpr_r4": "CPR R4",
+    "cpr_s1": "CPR S1",
+    "cpr_s2": "CPR S2",
+    "cpr_s3": "CPR S3",
+    "cpr_s4": "CPR S4",
+    "cpr_width": "CPR WIDTH",
+    "cpr_range_type": "CPR RANGE TYPE",
+    "cpr_prev_high": "CPR PREV HIGH",
+    "cpr_prev_low": "CPR PREV LOW",
+    "cpr_prev_close": "CPR PREV CLOSE"
   },
   "all_available_keys": {
     "close": "Closing price series",
@@ -36,7 +54,25 @@
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
     "ema_9": "EMA with 9 period",
-    "ema_20": "EMA with 20 period"
+    "ema_20": "EMA with 20 period",
+    "ema_50": "EMA with 50 period",
+    "ema_200": "EMA with 200 period",
+    "cpr_pivot": "CPR PIVOT",
+    "cpr_tc": "CPR TC",
+    "cpr_bc": "CPR BC",
+    "cpr_r1": "CPR R1",
+    "cpr_r2": "CPR R2",
+    "cpr_r3": "CPR R3",
+    "cpr_r4": "CPR R4",
+    "cpr_s1": "CPR S1",
+    "cpr_s2": "CPR S2",
+    "cpr_s3": "CPR S3",
+    "cpr_s4": "CPR S4",
+    "cpr_width": "CPR WIDTH",
+    "cpr_range_type": "CPR RANGE TYPE",
+    "cpr_prev_high": "CPR PREV HIGH",
+    "cpr_prev_low": "CPR PREV LOW",
+    "cpr_prev_close": "CPR PREV CLOSE"
   },
   "usage_examples": {
     "simple_condition": "close > ma_20",
@@ -84,15 +120,30 @@
         "enabled": true,
         "periods": [
           9,
-          20
+          20,
+          50,
+          200
         ],
         "talib_function": "EMA",
         "config": {
           "periods": [
             9,
-            20
+            20,
+            50,
+            200
           ],
           "talib_function": "EMA"
+        }
+      },
+      "cpr": {
+        "enabled": true,
+        "periods": [],
+        "talib_function": null,
+        "config": {
+          "timeframe": "daily",
+          "calculation_method": "frankochavs_numpy",
+          "include_range_type": true,
+          "include_support_resistance": true
         }
       }
     },

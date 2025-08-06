@@ -59,7 +59,8 @@ class DynamicWarmupCalculator:
         'EMA': 20,      # Minimum 20 candles for any EMA
         'VWAP': 50,     # Minimum 50 candles for session-based VWAP
         'BB': 25,       # Minimum 25 candles for Bollinger Bands
-        'MA': 10        # Minimum 10 candles for moving averages
+        'MA': 10,       # Minimum 10 candles for moving averages
+        'CPR': 1        # CPR only needs 1 day warmup (first day has no previous day data)
     }
     
     # Timeframe conversion factors (candles per trading day)
@@ -509,7 +510,13 @@ class DynamicWarmupCalculator:
     
     def _calculate_single_warmup(self, indicator_type: str, period: int) -> int:
         """Calculate warmup period for a single indicator."""
-        # Calculate based on accuracy multiplier
+        
+        # Special handling for CPR - it only needs minimal warmup (2 days max)
+        if indicator_type == 'CPR':
+            # CPR needs only 2 trading days converted to candles
+            return self.MIN_WARMUP_PERIODS.get('CPR', 2) * self.candles_per_day
+        
+        # Calculate based on accuracy multiplier for other indicators
         calculated_warmup = period * self.accuracy_multiplier
         
         # Apply minimum warmup if defined

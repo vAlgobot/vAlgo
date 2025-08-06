@@ -68,6 +68,13 @@
       "enabled": false,
       "period": 20,
       "std_dev": 2
+    },
+    "cpr": {
+      "enabled": true,
+      "timeframe": "daily",
+      "calculation_method": "frankochavs_numpy",
+      "include_range_type": true,
+      "include_support_resistance": true
     }
   },
   "validation": {

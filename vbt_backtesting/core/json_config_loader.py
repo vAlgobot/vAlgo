@@ -213,6 +213,15 @@ class JSONConfigLoader:
                     for period in indicator_config['periods']:
                         key = f"{indicator_name}_{period}"
                         indicator_keys[key] = f"{indicator_name.upper()} with {period} period"
+                elif indicator_name == 'cpr':
+                    # CPR generates multiple sub-indicators
+                    cpr_indicators = [
+                        'cpr_pivot', 'cpr_tc', 'cpr_bc', 'cpr_r1', 'cpr_r2', 'cpr_r3', 'cpr_r4',
+                        'cpr_s1', 'cpr_s2', 'cpr_s3', 'cpr_s4', 'cpr_width', 'cpr_range_type',
+                        'cpr_prev_high', 'cpr_prev_low', 'cpr_prev_close'
+                    ]
+                    for cpr_sub in cpr_indicators:
+                        indicator_keys[cpr_sub] = f"CPR {cpr_sub.replace('cpr_', '').upper().replace('_', ' ')}"
                 else:
                     # Single indicators (VWAP, Bollinger Bands, etc.)
                     indicator_keys[indicator_name] = f"{indicator_name.upper()} indicator"

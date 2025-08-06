@@ -52,6 +52,14 @@ except ImportError:
     print("❌ VectorBT not available. Install with: pip install vectorbt[full]")
     sys.exit(1)
 
+# DuckDB imports for CPR database integration
+try:
+    import duckdb
+    DUCKDB_AVAILABLE = True
+except ImportError:
+    DUCKDB_AVAILABLE = False
+    print("❌ DuckDB not available. CPR calculation will fail if database access is required.")
+
 # vAlgo system imports - required for production
 
 class SmartIndicatorEngine:
@@ -120,6 +128,10 @@ class SmartIndicatorEngine:
         
         # Initialize warmup calculator for data validation
         self.warmup_calculator = DynamicWarmupCalculator(config_loader)
+        
+        # CPR calculation cache for ultra-fast performance
+        self._cpr_cache = {}
+        self._current_ohlcv_data = None
         
         # Simplified logging - avoid duplicate messages when used in multiple components
         if not hasattr(SmartIndicatorEngine, '_initialized_count'):
@@ -351,6 +363,330 @@ class SmartIndicatorEngine:
                 return np.full_like(close, np.nan)
     
     # =============================================================================
+    # Ultra-Fast CPR Implementation with NumPy (Frankochavs Formula)
+    # =============================================================================
+    
+    def _calculate_cpr_numpy_batch(self, close: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Ultra-fast CPR calculation using pure NumPy batch processing.
+        
+        Uses Frankochavs CPR formulas with previous day (D-1) OHLC data.
+        No warmup required since CPR only needs previous day's data.
+        Fail-fast approach - no fallbacks, no hardcoded values.
+        
+        Args:
+            close: Close price array (not used directly, but required for interface compatibility)
+            
+        Returns:
+            Dictionary of all CPR indicators as NumPy arrays
+            
+        Raises:
+            ConfigurationError: If calculation fails (fail-fast, no fallbacks)
+        """
+        print("🚀 Ultra-Fast CPR Calculation: Starting NumPy batch processing...")
+        
+        # FAIL-FAST: Ensure OHLCV data is available
+        if not hasattr(self, '_current_ohlcv_data') or self._current_ohlcv_data is None:
+            raise ConfigurationError("OHLCV data not available for CPR calculation")
+        
+        data = self._current_ohlcv_data
+        
+        # Check cache first for ultra-fast performance
+        data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
+        if data_hash in self._cpr_cache:
+            print("⚡ Using cached CPR results (ultra-fast)")
+            return self._cpr_cache[data_hash]
+        
+        # Extract dates for daily grouping
+        if hasattr(data.index, 'date'):
+            dates_array = np.array([d for d in data.index.date])
+        else:
+            dates_array = np.array([d.date() for d in pd.to_datetime(data.index)])
+        
+        print(f"   📊 Processing {len(data)} candles for CPR calculation")
+        
+        # Try database-first approach for daily OHLC (most accurate)
+        daily_ohlc = self._fetch_daily_candles_from_database()
+        
+        if daily_ohlc is None:
+            # FAIL-FAST: No fallback to aggregation
+            raise ConfigurationError(
+                "Database unavailable for daily OHLC data. CPR calculation requires accurate daily candles. "
+                "Ensure DuckDB database is available and contains daily OHLC data."
+            )
+        
+        # Calculate CPR levels using vectorized NumPy operations
+        cpr_results = self._calculate_cpr_levels_numpy_optimized(daily_ohlc)
+        
+        # Broadcast daily CPR values back to intraday timeframe
+        cpr_intraday = self._broadcast_daily_cpr_to_intraday_optimized(cpr_results, dates_array, len(data))
+        
+        # Cache results for performance
+        self._cpr_cache[data_hash] = cpr_intraday
+        
+        print(f"✅ Ultra-Fast CPR Calculation: Completed with {len(cpr_results) - 1} CPR indicators")
+        
+        return cpr_intraday
+    
+    def _fetch_daily_candles_from_database(self) -> Optional[Dict[str, np.ndarray]]:
+        """
+        Fetch daily OHLC candles directly from DuckDB database for maximum accuracy.
+        
+        Returns:
+            Dictionary with daily OHLC data as NumPy arrays, or None if database unavailable
+            
+        Raises:
+            ConfigurationError: If database query fails (fail-fast approach)
+        """
+        if not DUCKDB_AVAILABLE:
+            return None
+        
+        try:
+            # Get database path from config
+            db_path = self.main_config.get('database', {}).get('path', 'data/vAlgo_market_data.db')
+            symbol = self.main_config.get('trading', {}).get('symbol', 'NIFTY')
+            
+            # FAIL-FAST: Database path must exist
+            if not Path(db_path).exists():
+                raise ConfigurationError(f"Database not found at: {db_path}")
+            
+            conn = duckdb.connect(db_path)
+            
+            # Ultra-fast daily aggregation query (matching existing CPR implementation)
+            query = """
+            SELECT 
+                DATE(timestamp) as date,
+                FIRST(open ORDER BY timestamp) as open,
+                MAX(high) as high,
+                MIN(low) as low,
+                (SELECT close FROM ohlcv_data sub 
+                 WHERE sub.symbol = ? 
+                 AND DATE(sub.timestamp) = DATE(ohlcv_data.timestamp) 
+                 ORDER BY 
+                    CASE WHEN EXTRACT(hour FROM sub.timestamp) = 0 AND EXTRACT(minute FROM sub.timestamp) = 0 
+                         THEN 0 ELSE 1 END,
+                    sub.timestamp DESC 
+                 LIMIT 1) as close,
+                SUM(volume) as volume
+            FROM ohlcv_data 
+            WHERE symbol = ?
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp)
+            """
+            
+            result = conn.execute(query, [symbol, symbol]).fetchall()
+            conn.close()
+            
+            if not result:
+                raise ConfigurationError(f"No daily OHLC data found for symbol: {symbol}")
+            
+            # Convert to NumPy arrays directly (no pandas overhead)
+            dates = np.array([row[0] for row in result])
+            opens = np.array([float(row[1]) for row in result])
+            highs = np.array([float(row[2]) for row in result])
+            lows = np.array([float(row[3]) for row in result])
+            closes = np.array([float(row[4]) for row in result])
+            # Note: row[5] would be volume, but we don't need it for CPR
+            
+            print(f"   🗄️  Fetched {len(result)} daily candles from database")
+            
+            return {
+                'dates': dates,
+                'open': opens,
+                'high': highs,
+                'low': lows,
+                'close': closes
+            }
+            
+        except Exception as e:
+            if "Database not found" in str(e) or "No daily OHLC data found" in str(e):
+                raise  # Re-raise our ConfigurationError
+            else:
+                raise ConfigurationError(f"Database query failed for daily OHLC: {e}")
+    
+    def _calculate_cpr_levels_numpy_optimized(self, daily_ohlc: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """
+        Calculate all CPR levels using ultra-fast NumPy vectorized operations.
+        
+        Implements Frankochavs CPR formulas with zero Python loops:
+        - Pivot = (H + L + C) / 3
+        - BC = (H + L) / 2  
+        - TC = 2 * Pivot - BC
+        - Support/Resistance levels using standard formulas
+        
+        Args:
+            daily_ohlc: Dictionary with daily OHLC data as NumPy arrays
+            
+        Returns:
+            Dictionary with all CPR levels as NumPy arrays
+            
+        Raises:
+            ConfigurationError: If calculation fails (fail-fast approach)
+        """
+        # FAIL-FAST: Validate input data
+        required_keys = ['dates', 'high', 'low', 'close']
+        for key in required_keys:
+            if key not in daily_ohlc:
+                raise ConfigurationError(f"Missing required OHLC data: {key}")
+        
+        # Extract daily OHLC arrays (direct NumPy arrays)
+        high = daily_ohlc['high']
+        low = daily_ohlc['low']
+        close = daily_ohlc['close']
+        dates = daily_ohlc['dates']
+        
+        # FAIL-FAST: Ensure data consistency
+        if len(high) != len(low) or len(low) != len(close) or len(close) != len(dates):
+            raise ConfigurationError("OHLC array lengths are inconsistent")
+        
+        if len(high) < 2:
+            raise ConfigurationError("Need at least 2 days of data for CPR calculation")
+        
+        # Previous day arrays using NumPy roll (ultra-fast shift operation)
+        prev_high = np.roll(high, 1)
+        prev_low = np.roll(low, 1)
+        prev_close = np.roll(close, 1)
+        
+        # Set first day to NaN (no previous day data available)
+        prev_high[0] = np.nan
+        prev_low[0] = np.nan
+        prev_close[0] = np.nan
+        
+        # FRANKOCHAVS CPR FORMULAS - Ultra-fast vectorized calculation for ALL dates at once
+        # Core CPR levels (CORRECTED FORMULAS - all operations vectorized across entire array)
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        tc = (prev_high + prev_low) / 2.0  # Top Central (TC) = (H + L) / 2
+        bc = 2.0 * pivot - tc  # Bottom Central (BC) = 2 * Pivot - TC
+        
+        # DEBUG: Show sample calculations for verification
+        if len(dates) > 1 and not np.isnan(pivot[1]):
+            sample_idx = 1  # Second day (first day with valid CPR)
+            print(f"   🔍 CPR DEBUG - Sample calculation for {dates[sample_idx]}:")
+            print(f"      Previous day OHLC: H={prev_high[sample_idx]:.2f}, L={prev_low[sample_idx]:.2f}, C={prev_close[sample_idx]:.2f}")
+            print(f"      Calculated CPR: Pivot={pivot[sample_idx]:.2f}, TC={tc[sample_idx]:.2f}, BC={bc[sample_idx]:.2f}")
+            print(f"      Formula check: 2*Pivot-TC = {2*pivot[sample_idx] - tc[sample_idx]:.2f} (should equal BC)")
+            print(f"      CPR Width: {tc[sample_idx] - bc[sample_idx]:.2f}")
+        
+        # Support and Resistance levels - all calculated in single vectorized operations
+        r1 = 2.0 * pivot - prev_low
+        r2 = pivot + (prev_high - prev_low)
+        r3 = prev_high + 2.0 * (pivot - prev_low)
+        r4 = r3 + (r2 - r1)
+        
+        s1 = 2.0 * pivot - prev_high
+        s2 = pivot - (prev_high - prev_low)
+        s3 = prev_low - 2.0 * (prev_high - pivot)
+        s4 = s3 - (s1 - s2)  # Frankochavs variation (not standard CPR)
+        
+        # CPR Width and Range Type calculation (vectorized)
+        cpr_width = tc - bc
+        
+        # Avoid division by zero with fail-fast approach
+        zero_pivot_mask = np.abs(pivot) < 1e-10
+        if np.any(zero_pivot_mask):
+            raise ConfigurationError("Invalid pivot values (near zero) detected in CPR calculation")
+        
+        range_pct = np.abs(cpr_width / pivot) * 100.0
+        
+        # Range type: 0 = Narrow (<0.35%), 1 = Wide (≥0.35%)
+        range_type = np.where(range_pct < 0.35, 0, 1)
+        
+        # Count valid (non-NaN) calculations
+        valid_mask = ~np.isnan(pivot)
+        valid_count = np.sum(valid_mask)
+        narrow_count = np.sum((range_type == 0) & valid_mask)
+        wide_count = np.sum((range_type == 1) & valid_mask)
+        
+        print(f"   🧮 CPR Levels calculated for {valid_count}/{len(dates)} days using Frankochavs formulas")
+        print(f"   📐 Range Analysis: {narrow_count} Narrow days, {wide_count} Wide days")
+        
+        return {
+            'dates': dates,
+            'cpr_pivot': pivot,
+            'cpr_tc': tc,
+            'cpr_bc': bc,
+            'cpr_r1': r1,
+            'cpr_r2': r2,
+            'cpr_r3': r3,
+            'cpr_r4': r4,
+            'cpr_s1': s1,
+            'cpr_s2': s2,
+            'cpr_s3': s3,
+            'cpr_s4': s4,
+            'cpr_width': cpr_width,
+            'cpr_range_type': range_type,
+            'cpr_prev_high': prev_high,
+            'cpr_prev_low': prev_low,
+            'cpr_prev_close': prev_close
+        }
+    
+    def _broadcast_daily_cpr_to_intraday_optimized(self, cpr_results: Dict[str, np.ndarray], 
+                                                  intraday_dates: np.ndarray, 
+                                                  intraday_length: int) -> Dict[str, np.ndarray]:
+        """
+        Broadcast daily CPR values to intraday timeframe using ultra-fast NumPy vectorized operations.
+        
+        Args:
+            cpr_results: Dictionary with daily CPR data
+            intraday_dates: Array of dates for each intraday candle
+            intraday_length: Length of intraday data
+            
+        Returns:
+            Dictionary with CPR indicators broadcast to intraday timeframe
+            
+        Raises:
+            ConfigurationError: If broadcasting fails (fail-fast approach)
+        """
+        daily_dates = cpr_results['dates']
+        
+        # FAIL-FAST: Validate inputs
+        if len(intraday_dates) != intraday_length:
+            raise ConfigurationError("Intraday dates array length mismatch")
+        
+        # CPR indicators to broadcast (all 16 indicators)
+        cpr_indicators = [
+            'cpr_pivot', 'cpr_tc', 'cpr_bc', 'cpr_r1', 'cpr_r2', 'cpr_r3', 'cpr_r4',
+            'cpr_s1', 'cpr_s2', 'cpr_s3', 'cpr_s4', 'cpr_width', 'cpr_range_type',
+            'cpr_prev_high', 'cpr_prev_low', 'cpr_prev_close'
+        ]
+        
+        # Initialize output arrays
+        intraday_cpr = {}
+        for indicator in cpr_indicators:
+            if indicator not in cpr_results:
+                raise ConfigurationError(f"Missing CPR indicator: {indicator}")
+            intraday_cpr[indicator] = np.full(intraday_length, np.nan)
+        
+        # ULTRA-FAST VECTORIZED BROADCASTING
+        # Create date mapping using NumPy for maximum performance
+        try:
+            # Convert dates to comparable format if needed
+            if len(daily_dates) > 0:
+                # Create boolean mask for each daily date (vectorized approach)
+                for daily_idx, daily_date in enumerate(daily_dates):
+                    # Find all intraday candles for this date (vectorized comparison)
+                    intraday_mask = intraday_dates == daily_date
+                    
+                    if np.any(intraday_mask):
+                        # Broadcast all CPR values for this date at once (vectorized assignment)
+                        for indicator in cpr_indicators:
+                            intraday_cpr[indicator][intraday_mask] = cpr_results[indicator][daily_idx]
+            
+            # Count successful broadcasts
+            non_nan_count = np.sum(~np.isnan(intraday_cpr['cpr_pivot']))
+            broadcast_rate = (non_nan_count / intraday_length) * 100
+            
+            print(f"   📡 CPR values broadcast to {non_nan_count}/{intraday_length} intraday candles ({broadcast_rate:.1f}%)")
+            
+            if broadcast_rate < 50:
+                print(f"   ⚠️  Warning: Low CPR broadcast rate ({broadcast_rate:.1f}%) - check date alignment")
+            
+            return intraday_cpr
+            
+        except Exception as e:
+            raise ConfigurationError(f"CPR broadcasting failed: {e}")
+    
+    # =============================================================================
     # Internal Helper Methods
     # =============================================================================
     
@@ -399,27 +735,59 @@ class SmartIndicatorEngine:
         indicator_mappings = {
             'rsi': self._talib_rsi_apply_func,
             'sma': self._talib_sma_apply_func,
-            'ema': self._talib_ema_apply_func
+            'ema': self._talib_ema_apply_func,
+            'cpr': self._calculate_cpr_numpy_batch
         }
         
         return indicator_mappings
     
     def _calculate_single_indicator(self, indicator_name: str, data: pd.DataFrame) -> pd.Series:
         """Calculate a single indicator."""
-        # Parse indicator name (e.g., "rsi_14" -> type="rsi", period=14)
+        
+        # SPECIAL HANDLING FOR CPR SUB-INDICATORS (check first before parsing)
+        if indicator_name.startswith('cpr_'):
+            # Store current data for CPR calculation
+            self._current_ohlcv_data = data
+            
+            # Check if we've already calculated CPR for this data
+            data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
+            
+            if data_hash not in self._cpr_cache:
+                # Calculate all CPR indicators at once
+                cpr_calc_function = self.indicator_functions.get('cpr')
+                if cpr_calc_function is None:
+                    raise ConfigurationError("CPR calculation function not found")
+                
+                print(f"🚀 Ultra-Fast CPR Calculation: Starting for {indicator_name}...")
+                self._cpr_cache[data_hash] = cpr_calc_function(data['close'].values)
+            
+            # Return the specific CPR sub-indicator requested
+            cpr_results = self._cpr_cache[data_hash]
+            if indicator_name in cpr_results:
+                return pd.Series(cpr_results[indicator_name], index=data.index, name=indicator_name)
+            else:
+                available_keys = list(cpr_results.keys())
+                raise ConfigurationError(f"CPR sub-indicator '{indicator_name}' not found. Available: {available_keys}")
+        
+        # Parse indicator name for standard indicators (e.g., "rsi_14" -> type="rsi", period=14)
         if '_' in indicator_name:
             indicator_type, period_str = indicator_name.split('_', 1)
-            period = int(period_str)
+            try:
+                period = int(period_str)
+            except ValueError:
+                # For non-CPR indicators that can't parse period
+                indicator_type = indicator_name
+                period = None
         else:
             indicator_type = indicator_name
             period = None
         
-        # Get calculation function
+        # Get calculation function for standard indicators
         calc_function = self.indicator_functions.get(indicator_type)
         if calc_function is None:
             raise ConfigurationError(f"Unsupported indicator type: {indicator_type}")
         
-        # Calculate indicator
+        # Standard indicator calculation
         close_prices = data['close'].values
         
         if period is not None:
