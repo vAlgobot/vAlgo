@@ -200,17 +200,9 @@ class SignalExtractor(ProcessorBase):
                     "SIGNAL_EXTRACTION"
                 )
                 
-                # RISK MANAGEMENT: Display daily limit summary
+                # RISK MANAGEMENT: Simple summary
                 total_dates = len(daily_entry_counts)
-                print(f"🛡️ Risk Management Daily Limits Summary:")
-                if total_dates > 0:
-                    for signal_date, strategy_counts in sorted(daily_entry_counts.items()):
-                        print(f"   📅 {signal_date}:")
-                        for strategy_name, count in strategy_counts.items():
-                            status = "AT LIMIT" if count >= max_daily_entries else f"{count}/{max_daily_entries}"
-                            print(f"      {strategy_name}: {status}")
-                else:
-                    print(f"   No entries generated (no daily limits applied)")
+                print(f"🛡️ Risk Management: Daily limits enforced across {total_dates} trading days")
                 
                 print(f"Strategy-Level Entry/Exit extraction complete:")
                 print(f"   Strategy Groups Processed: {len(strategy_groups)}")
