@@ -35,7 +35,7 @@
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2025-06-01",
+    "start_date": "2024-06-01",
     "end_date": "2025-06-30", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,
@@ -57,7 +57,7 @@
     },
     "ema": {
       "enabled": true,
-      "periods": [9, 20],
+      "periods": [9, 20,50,200],
       "talib_function": "EMA"
     },
     "vwap": {
@@ -131,11 +131,54 @@
     "export_path": "output/vbt_reports/" 
   },
   "trade_comparison": {
-    "enabled": true,
+    "enabled": false,
     "quantman_csv_path": "output/quantman/Quantman_Nifty_Backtest_SMA9_20_50_200.csv",
     "tolerance_premium": 0.1,
     "tolerance_time_minutes": 1,
     "tolerance_pnl_percentage": 5.0,
     "export_comparison_csv": true
+  },
+  "parameter_optimization": {
+    "enabled": true,
+    "optimization_mode": "vectorized_grid_search",
+    "performance_weights": {
+      "total_return_pct": 0.30,
+      "sharpe_ratio": 0.25,
+      "profit_factor": 0.20,
+      "win_rate": 0.15,
+      "max_drawdown": 0.10
+    },
+    "indicators": {
+      "rsi": {
+        "base_period": 14,
+        "step_size": 2,
+        "min_period": 8,
+        "max_period": 28,
+        "test_periods": [8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
+      },
+      "ema": {
+        "base_periods": [9, 20],
+        "step_size": 2,
+        "min_period": 5,
+        "max_period": 30,
+        "test_periods": [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29]
+      },
+      "sma": {
+        "base_periods": [9, 20, 50, 200],
+        "step_size": 5,
+        "optimization_ranges": {
+          "fast": [5, 7, 9, 11, 13, 15, 17, 19, 21],
+          "medium": [15, 18, 20, 22, 25, 28, 30, 32, 35],
+          "slow": [40, 45, 50, 55, 60, 65, 70],
+          "trend": [150, 175, 200, 225, 250]
+        }
+      }
+    },
+    "output": {
+      "export_results": true,
+      "export_path": "output/vbt_reports/optimization/",
+      "top_n_results": 10,
+      "include_performance_heatmap": true
+    }
   }
 }
