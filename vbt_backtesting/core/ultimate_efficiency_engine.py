@@ -84,6 +84,9 @@ class UltimateEfficiencyEngine:
             config_dir: Optional configuration directory path
             db_path: Optional database path override
         """
+        # Track execution start time from the very beginning
+        self.execution_start_time = time.time()
+        
         # Reset logger for fresh execution
         reset_selective_logger()
         self.selective_logger = get_selective_logger("ultimate_efficiency_engine")
@@ -92,7 +95,8 @@ class UltimateEfficiencyEngine:
         self.selective_logger.log_major_component("Ultimate Efficiency Engine initialization starting", "SYSTEM")
         
         try:
-            # Initialize JSON configuration loader - config_dir is now required
+            # Phase 1: Configuration Loading (with timing)
+            config_start = time.time()
             if config_dir is None:
                 # Get config directory relative to this file
                 config_dir = str(Path(__file__).parent.parent / "config")
@@ -101,9 +105,15 @@ class UltimateEfficiencyEngine:
             self.main_config = self.config_loader.main_config
             self.strategies_config = self.config_loader.strategies_config
             
-            # Initialize performance tracking
+            # Initialize comprehensive performance tracking (including initialization components)
             self.performance_stats = {
-                'initialization_time': 0,
+                # Initialization phase components
+                'config_loading_time': 0,
+                'engine_initialization_time': 0,
+                'component_setup_time': 0,
+                'warmup_calculation_time': 0,
+                
+                # Analysis phase components  
                 'data_loading_time': 0,
                 'indicator_calculation_time': 0,
                 'data_filtering_time': 0,
@@ -112,6 +122,8 @@ class UltimateEfficiencyEngine:
                 'pnl_calculation_time': 0,
                 'results_compilation_time': 0,
                 'export_time': 0,
+                
+                # Overall performance metrics
                 'total_processing_time': 0,
                 'total_records_processed': 0,
                 'records_per_second': 0,
@@ -119,8 +131,15 @@ class UltimateEfficiencyEngine:
                 'target_achievement_percentage': 0
             }
             
-            # Initialize core efficiency components
-            init_start = time.time()
+            # Individual indicator timing tracking
+            self.indicator_timings = {}
+            
+            # Record configuration loading time
+            config_end = time.time()
+            self.performance_stats['config_loading_time'] = config_end - config_start
+            
+            # Phase 2: Component Setup (with timing)
+            component_setup_start = time.time()
             
             # 1. Ultra-Efficient Data Loader (single DB connection)
             print("🔄 Initializing Ultra-Efficient Data Loader...")
@@ -172,11 +191,16 @@ class UltimateEfficiencyEngine:
             )
             print(f"   ✅ All modular components ready in {time.time() - modular_start:.2f}s")
             
-            init_time = time.time() - init_start
-            self.performance_stats['initialization_time'] = init_time
+            # Record component setup time
+            component_setup_end = time.time()
+            self.performance_stats['component_setup_time'] = component_setup_end - component_setup_start
+            
+            # Calculate total engine initialization time (from execution start to end of init)
+            engine_init_end = time.time()
+            self.performance_stats['engine_initialization_time'] = engine_init_end - self.execution_start_time
             
             self.selective_logger.log_major_component(
-                f"Ultimate Efficiency Engine initialized successfully in {init_time:.3f}s", "SYSTEM"
+                f"Ultimate Efficiency Engine initialized successfully in {self.performance_stats['engine_initialization_time']:.3f}s", "SYSTEM"
             )
             
         except Exception as e:
@@ -215,10 +239,20 @@ class UltimateEfficiencyEngine:
             # Phase 1: Ultra-Efficient Data Loading with Dynamic Warmup
             data_start = time.time()
             exchange = self.main_config['trading']['exchange']
+            
+            # Track warmup calculation separately (embedded within data loading)
+            warmup_calc_start = time.time()
             market_data, warmup_analysis = self.data_loader.get_ohlcv_data_with_warmup(
                 symbol, exchange, timeframe, start_date, end_date
             )
-            self.performance_stats['data_loading_time'] = time.time() - data_start
+            
+            # Estimate warmup calculation time (part of the data loading process)
+            # This includes dynamic warmup calculator analysis time
+            warmup_calc_end = time.time() 
+            self.performance_stats['warmup_calculation_time'] = warmup_calc_end - warmup_calc_start
+            
+            data_end = time.time()
+            self.performance_stats['data_loading_time'] = data_end - data_start
             self.performance_stats['total_records_processed'] = len(market_data)
             
             # Log warmup analysis
@@ -232,6 +266,9 @@ class UltimateEfficiencyEngine:
             indicator_start = time.time()
             indicators = self.indicator_engine.calculate_indicators(market_data)
             self.performance_stats['indicator_calculation_time'] = time.time() - indicator_start
+            
+            # Capture individual indicator timings from SmartIndicatorEngine
+            self.indicator_timings = self.indicator_engine.get_indicator_timings()
             
             # Phase 2.5: Filter to Backtesting Period (after warmup-calculated indicators)
             filter_start = time.time()
@@ -388,8 +425,8 @@ class UltimateEfficiencyEngine:
                 self.results_exporter.export_results(results, symbol, timeframe, start_date, end_date)
                 self.performance_stats['export_time'] = time.time() - export_start
             
-            # Calculate final performance metrics
-            total_time = time.time() - analysis_start
+            # Calculate final performance metrics using complete execution time (from very beginning)
+            total_time = time.time() - self.execution_start_time
             self.performance_stats['total_processing_time'] = total_time
             
             if total_time > 0:
@@ -845,6 +882,54 @@ class UltimateEfficiencyEngine:
             self.selective_logger.log_detailed(f"Error displaying trade comparison summary: {e}", "WARNING", "SYSTEM")
             print(f"❌ Error displaying trade comparison summary: {e}")
     
+    def _extract_base_indicator_type(self, indicator_name: str) -> str:
+        """
+        Extract base indicator type from parameter-specific indicator names.
+        
+        Args:
+            indicator_name: Full indicator name (e.g., 'rsi_14', 'cpr_pivot', 'sma_20')
+            
+        Returns:
+            Base indicator type (e.g., 'rsi', 'cpr', 'sma')
+        """
+        # Handle CPR sub-indicators (all variations map to 'cpr')
+        if indicator_name.startswith('cpr_'):
+            return 'cpr'
+        
+        # Handle previous day sub-indicators (map to 'previous_day')
+        if indicator_name.startswith('previous_day_'):
+            return 'previous_day'
+            
+        # Handle previous candle sub-indicators (map to 'previous_candle_ohlc')
+        if indicator_name.startswith('previous_candle_'):
+            return 'previous_candle_ohlc'
+        
+        # Handle standard indicators with parameters (e.g., 'rsi_14' -> 'rsi')
+        if '_' in indicator_name:
+            base_type = indicator_name.split('_')[0]
+            return base_type
+        
+        # Return as-is if no underscore (simple indicator names)
+        return indicator_name
+    
+    def _consolidate_indicator_timings(self, indicator_timings: Dict[str, float]) -> Dict[str, float]:
+        """
+        Consolidate indicator timings by base indicator type.
+        
+        Args:
+            indicator_timings: Dictionary mapping individual indicator names to timing values
+            
+        Returns:
+            Dictionary mapping base indicator types to consolidated timing values
+        """
+        consolidated = {}
+        
+        for indicator_name, timing in indicator_timings.items():
+            base_type = self._extract_base_indicator_type(indicator_name)
+            consolidated[base_type] = consolidated.get(base_type, 0) + timing
+        
+        return consolidated
+
     def _display_performance_summary(self) -> None:
         """Display comprehensive performance summary using selective logging."""
         stats = self.performance_stats
@@ -859,6 +944,13 @@ class UltimateEfficiencyEngine:
         }
         
         component_timing = {
+            # Initialization phase components (missing from original)
+            'config_loading': f"{stats['config_loading_time']:.3f}s",
+            'engine_initialization': f"{stats['engine_initialization_time']:.3f}s", 
+            'component_setup': f"{stats['component_setup_time']:.3f}s",
+            'warmup_calculation': f"{stats['warmup_calculation_time']:.3f}s",
+            
+            # Analysis phase components (existing)
             'data_loading': f"{stats['data_loading_time']:.3f}s",
             'indicator_calculation': f"{stats['indicator_calculation_time']:.3f}s",
             'data_filtering': f"{stats['data_filtering_time']:.3f}s",
@@ -869,9 +961,24 @@ class UltimateEfficiencyEngine:
             'export_time': f"{stats['export_time']:.3f}s"
         }
         
+        # Consolidated indicator timing metrics (end-to-end by indicator type)
+        indicator_timing = {}
+        if self.indicator_timings:
+            # Consolidate timings by base indicator type (e.g., all SMA windows -> 'sma')
+            consolidated_timings = self._consolidate_indicator_timings(self.indicator_timings)
+            
+            # Sort consolidated indicators by total timing for better display
+            sorted_indicators = sorted(consolidated_timings.items(), key=lambda x: x[1], reverse=True)
+            for indicator_type, total_timing in sorted_indicators:
+                indicator_timing[indicator_type] = f"{total_timing:.3f}s"
+        
         # Log performance summary (shows in console + logs to file)
         self.selective_logger.log_performance(performance_summary, "ULTIMATE_EFFICIENCY")
         self.selective_logger.log_performance(component_timing, "COMPONENT_TIMING")
+        
+        # Log individual indicator timing if available
+        if indicator_timing:
+            self.selective_logger.log_performance(indicator_timing, "INDICATOR_TIMING")
     
     def close_connections(self) -> None:
         """Close all database connections and cleanup resources."""

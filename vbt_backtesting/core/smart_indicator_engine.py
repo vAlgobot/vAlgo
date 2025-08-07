@@ -123,6 +123,9 @@ class SmartIndicatorEngine:
             'numpy_fallback_allowed': self.allow_numpy_fallback
         }
         
+        # Individual indicator timing tracking
+        self.indicator_timings = {}
+        
         # Create indicator calculation functions
         self.indicator_functions = self._create_indicator_functions()
         
@@ -181,7 +184,15 @@ class SmartIndicatorEngine:
         
         for indicator_name in enabled_indicator_keys:
             try:
+                # Track individual indicator timing
+                indicator_start_time = datetime.now()
                 indicator_values = self._calculate_single_indicator(indicator_name, data)
+                indicator_end_time = datetime.now()
+                
+                # Store timing for this indicator
+                indicator_duration = (indicator_end_time - indicator_start_time).total_seconds()
+                self.indicator_timings[indicator_name] = indicator_duration
+                
                 calculated_indicators[indicator_name] = indicator_values
                 
                 # Validation logging with data type handling
@@ -191,7 +202,7 @@ class SmartIndicatorEngine:
                 else:
                     # Numeric data (like cpr_pivot, cpr_range_type, etc.)
                     valid_count = np.sum(~np.isnan(indicator_values))
-                print(f"   ✅ {indicator_name}: {valid_count} valid values")
+                print(f"   ✅ {indicator_name}: {valid_count} valid values ({indicator_duration:.3f}s)")
                 
             except Exception as e:
                 print(f"   ❌ Failed to calculate {indicator_name}: {e}")
@@ -1037,6 +1048,49 @@ class SmartIndicatorEngine:
             'talib_available': TALIB_AVAILABLE,
             'vectorbt_available': VECTORBT_AVAILABLE,
             'efficiency_enabled': self.main_config['performance']['enable_smart_indicators']
+        }
+    
+    def get_indicator_timings(self) -> Dict[str, float]:
+        """
+        Get individual indicator calculation times.
+        
+        Returns:
+            Dictionary mapping indicator names to calculation times in seconds
+        """
+        return self.indicator_timings.copy()
+    
+    def get_timing_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive timing summary for all indicators.
+        
+        Returns:
+            Dictionary with timing statistics and breakdown
+        """
+        if not self.indicator_timings:
+            return {
+                'total_indicators': 0,
+                'total_time': 0.0,
+                'average_time': 0.0,
+                'fastest_indicator': None,
+                'slowest_indicator': None,
+                'indicator_timings': {}
+            }
+        
+        timings = list(self.indicator_timings.values())
+        total_time = sum(timings)
+        average_time = total_time / len(timings)
+        
+        # Find fastest and slowest indicators
+        fastest_indicator = min(self.indicator_timings.items(), key=lambda x: x[1])
+        slowest_indicator = max(self.indicator_timings.items(), key=lambda x: x[1])
+        
+        return {
+            'total_indicators': len(self.indicator_timings),
+            'total_time': total_time,
+            'average_time': average_time,
+            'fastest_indicator': {'name': fastest_indicator[0], 'time': fastest_indicator[1]},
+            'slowest_indicator': {'name': slowest_indicator[0], 'time': slowest_indicator[1]},
+            'indicator_timings': self.indicator_timings.copy()
         }
     
     def get_warmup_requirements(self, start_date: Union[str, datetime]) -> Dict[str, Any]:

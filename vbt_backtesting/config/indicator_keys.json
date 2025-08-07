@@ -70,9 +70,9 @@
     "cpr_s4": "CPR S4",
     "cpr_width": "CPR WIDTH",
     "cpr_range_type": "CPR RANGE TYPE",
-    "cpr_prev_high": "CPR PREV HIGH",
-    "cpr_prev_low": "CPR PREV LOW",
-    "cpr_prev_close": "CPR PREV CLOSE"
+    "previous_day_high": "CPR PREV HIGH",
+    "previous_day_low": "CPR PREV LOW",
+    "previous_day_close": "CPR PREV CLOSE"
   },
   "usage_examples": {
     "simple_condition": "close > ma_20",

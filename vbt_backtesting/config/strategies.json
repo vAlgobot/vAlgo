@@ -17,7 +17,7 @@
         "status": "Active",
         "priority": 1,
         "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
-        "entry": "(close > sma_9) & (sma_9 > sma_20) & (sma_20 > sma_50) & (sma_50 > sma_200)",
+        "entry": "(close > previous_day_high) & (close > sma_9) & (sma_9 > sma_20) & (sma_20 > sma_50) & (sma_50 > sma_200)",
         "exit": "close < sma_20",
         "OptionType": "CALL",
         "StrikeType": "ATM",
@@ -27,7 +27,7 @@
         "status": "Active",
         "priority": 1,
         "description": "Multi-SMA trend PUT entry (9<20<50<200), exit on close > SMA20",
-        "entry": "(close < sma_9) & (sma_9 < sma_20) & (sma_20 < sma_50) & (sma_50 < sma_200)",
+        "entry": "(close > previous_day_low) & (close < sma_9) & (sma_9 < sma_20) & (sma_20 < sma_50) & (sma_50 < sma_200)",
         "exit": "close > sma_20",
         "OptionType": "PUT",
         "StrikeType": "ATM",
@@ -36,7 +36,7 @@
     }
   },
   "EMA_TrendFollow": {
-    "status": "Active",
+    "status": "InActive",
     "description": "Trend following strategies with moving average analysis",
     "max_concurrent_cases": 1,
     "cases": {
