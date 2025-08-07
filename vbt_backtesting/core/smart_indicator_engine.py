@@ -184,8 +184,13 @@ class SmartIndicatorEngine:
                 indicator_values = self._calculate_single_indicator(indicator_name, data)
                 calculated_indicators[indicator_name] = indicator_values
                 
-                # Validation logging
-                valid_count = np.sum(~np.isnan(indicator_values))
+                # Validation logging with data type handling
+                if indicator_values.dtype == object:
+                    # String data (like cpr_type)
+                    valid_count = np.sum(indicator_values != "")
+                else:
+                    # Numeric data (like cpr_pivot, cpr_range_type, etc.)
+                    valid_count = np.sum(~np.isnan(indicator_values))
                 print(f"   ✅ {indicator_name}: {valid_count} valid values")
                 
             except Exception as e:
@@ -578,27 +583,67 @@ class SmartIndicatorEngine:
         s3 = prev_low - 2.0 * (prev_high - pivot)
         s4 = s3 - (s1 - s2)  # Frankochavs variation (not standard CPR)
         
-        # CPR Width and Range Type calculation (vectorized)
+        # CPR Width and Enhanced Range Type classification (vectorized)
         cpr_width = tc - bc
         
-        # Avoid division by zero with fail-fast approach
-        zero_pivot_mask = np.abs(pivot) < 1e-10
-        if np.any(zero_pivot_mask):
-            raise ConfigurationError("Invalid pivot values (near zero) detected in CPR calculation")
+        # Enhanced CPR Range Type Classification using relative comparison
+        # Based on current day vs previous day CPR ranges
+        range_type = np.full(len(dates), 2, dtype=int)  # Default to "normal" (2)
         
-        range_pct = np.abs(cpr_width / pivot) * 100.0
+        # Only classify from second day onwards (need previous day data)
+        if len(dates) > 1:
+            # Calculate ranges for vectorized comparison
+            # Previous day ranges (exclude last day)
+            pd_full = tc[:-1] - bc[:-1]  # Previous day full range (top - bottom)
+            pd_half = tc[:-1] - pivot[:-1]  # Previous day half range (top - center)
+            
+            # Current day ranges (exclude first day) 
+            cd_full = tc[1:] - bc[1:]  # Current day full range
+            cd_half = tc[1:] - pivot[1:]  # Current day half range
+            
+            # Apply enhanced classification logic (vectorized)
+            # 0=extreme_narrow, 1=narrow, 2=normal, 3=wide, 4=extreme_wide
+            
+            # Extreme Narrow: cd_full < pd_half
+            extreme_narrow_mask = cd_full < pd_half
+            range_type[1:][extreme_narrow_mask] = 0
+            
+            # Narrow: pd_full >= cd_full <= pd_half (and not extreme_narrow)
+            narrow_mask = (pd_full >= cd_full) & (cd_full <= pd_full) & (cd_full >= pd_half) & (~extreme_narrow_mask)
+            range_type[1:][narrow_mask] = 1
+            
+            # Extreme Wide: cd_half >= pd_full
+            extreme_wide_mask = cd_half >= pd_full
+            range_type[1:][extreme_wide_mask] = 4
+            
+            # Wide: cd_full >= pd_full >= cd_half (and not extreme_wide)
+            wide_mask = (cd_full >= pd_full) & (pd_full <= cd_full) & (cd_half <= pd_full) & (~extreme_wide_mask)
+            range_type[1:][wide_mask] = 3
+            
+        # Normal: everything else (already set as default)
         
-        # Range type: 0 = Narrow (<0.35%), 1 = Wide (≥0.35%)
-        range_type = np.where(range_pct < 0.35, 0, 1)
-        
-        # Count valid (non-NaN) calculations
+        # Count classifications for analysis
         valid_mask = ~np.isnan(pivot)
         valid_count = np.sum(valid_mask)
-        narrow_count = np.sum((range_type == 0) & valid_mask)
-        wide_count = np.sum((range_type == 1) & valid_mask)
+        
+        # Count each range type
+        extreme_narrow_count = np.sum((range_type == 0) & valid_mask)
+        narrow_count = np.sum((range_type == 1) & valid_mask)
+        normal_count = np.sum((range_type == 2) & valid_mask)
+        wide_count = np.sum((range_type == 3) & valid_mask)
+        extreme_wide_count = np.sum((range_type == 4) & valid_mask)
         
         print(f"   🧮 CPR Levels calculated for {valid_count}/{len(dates)} days using Frankochavs formulas")
-        print(f"   📐 Range Analysis: {narrow_count} Narrow days, {wide_count} Wide days")
+        print(f"   📐 Enhanced Range Analysis:")
+        print(f"      🔹 Extreme Narrow: {extreme_narrow_count} days")
+        print(f"      🔸 Narrow: {narrow_count} days") 
+        print(f"      ⚪ Normal: {normal_count} days")
+        print(f"      🔶 Wide: {wide_count} days")
+        print(f"      🔴 Extreme Wide: {extreme_wide_count} days")
+        
+        # Create string representation of range types for readability
+        range_type_names = np.array(['extreme_narrow', 'narrow', 'normal', 'wide', 'extreme_wide'])
+        range_type_strings = range_type_names[range_type]
         
         return {
             'dates': dates,
@@ -615,9 +660,10 @@ class SmartIndicatorEngine:
             'cpr_s4': s4,
             'cpr_width': cpr_width,
             'cpr_range_type': range_type,
-            'cpr_prev_high': prev_high,
-            'cpr_prev_low': prev_low,
-            'cpr_prev_close': prev_close
+            'cpr_type': range_type_strings,  # Simple string type for easy use
+            'previous_day_high': prev_high,
+            'previous_day_low': prev_low,
+            'previous_day_close': prev_close
         }
     
     def _broadcast_daily_cpr_to_intraday_optimized(self, cpr_results: Dict[str, np.ndarray], 
@@ -643,19 +689,27 @@ class SmartIndicatorEngine:
         if len(intraday_dates) != intraday_length:
             raise ConfigurationError("Intraday dates array length mismatch")
         
-        # CPR indicators to broadcast (all 16 indicators)
+        # CPR indicators to broadcast (all 17 indicators)
         cpr_indicators = [
             'cpr_pivot', 'cpr_tc', 'cpr_bc', 'cpr_r1', 'cpr_r2', 'cpr_r3', 'cpr_r4',
-            'cpr_s1', 'cpr_s2', 'cpr_s3', 'cpr_s4', 'cpr_width', 'cpr_range_type',
-            'cpr_prev_high', 'cpr_prev_low', 'cpr_prev_close'
+            'cpr_s1', 'cpr_s2', 'cpr_s3', 'cpr_s4', 'cpr_width', 'cpr_range_type', 'cpr_type',
+            'previous_day_high', 'previous_day_low', 'previous_day_close'
         ]
         
-        # Initialize output arrays
+        # Initialize output arrays with appropriate data types
         intraday_cpr = {}
         for indicator in cpr_indicators:
             if indicator not in cpr_results:
                 raise ConfigurationError(f"Missing CPR indicator: {indicator}")
-            intraday_cpr[indicator] = np.full(intraday_length, np.nan)
+            
+            # Check data type and initialize appropriately
+            sample_value = cpr_results[indicator][0] if len(cpr_results[indicator]) > 0 else None
+            if isinstance(sample_value, (str, np.str_)):
+                # String data (like cpr_type)
+                intraday_cpr[indicator] = np.full(intraday_length, "", dtype=object)
+            else:
+                # Numeric data (like cpr_pivot, cpr_range_type, etc.)
+                intraday_cpr[indicator] = np.full(intraday_length, np.nan)
         
         # ULTRA-FAST VECTORIZED BROADCASTING
         # Create date mapping using NumPy for maximum performance
@@ -672,7 +726,7 @@ class SmartIndicatorEngine:
                         for indicator in cpr_indicators:
                             intraday_cpr[indicator][intraday_mask] = cpr_results[indicator][daily_idx]
             
-            # Count successful broadcasts
+            # Count successful broadcasts (use numeric indicator for counting)
             non_nan_count = np.sum(~np.isnan(intraday_cpr['cpr_pivot']))
             broadcast_rate = (non_nan_count / intraday_length) * 100
             
@@ -685,6 +739,67 @@ class SmartIndicatorEngine:
             
         except Exception as e:
             raise ConfigurationError(f"CPR broadcasting failed: {e}")
+    
+    # =============================================================================
+    # Previous Candle OHLC Implementation
+    # =============================================================================
+    
+    def _calculate_previous_candle_ohlc(self, close: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Calculate previous candle OHLC data using NumPy shift operations.
+        
+        For 5m timeframe:
+        - At 9:20, previous candle returns 9:15 OHLC data
+        - At 9:15, previous candle returns NaN (no previous data)
+        
+        Args:
+            close: Close price array (not used directly, but required for interface compatibility)
+            
+        Returns:
+            Dictionary with previous candle OHLC data as NumPy arrays
+            
+        Raises:
+            ConfigurationError: If calculation fails
+        """
+        print("🕐 Previous Candle OHLC Calculation: Starting NumPy shift processing...")
+        
+        # FAIL-FAST: Ensure OHLCV data is available
+        if not hasattr(self, '_current_ohlcv_data') or self._current_ohlcv_data is None:
+            raise ConfigurationError("OHLCV data not available for previous candle calculation")
+        
+        data = self._current_ohlcv_data
+        
+        # Extract OHLC data
+        open_data = data['open'].values
+        high_data = data['high'].values
+        low_data = data['low'].values
+        close_data = data['close'].values
+        
+        # Shift each OHLC series by 1 period to get previous candle data
+        # np.roll with shift=1 moves data forward by 1 position
+        previous_open = np.roll(open_data, 1)
+        previous_high = np.roll(high_data, 1)
+        previous_low = np.roll(low_data, 1)
+        previous_close = np.roll(close_data, 1)
+        
+        # Set first candle to NaN (no previous data available)
+        previous_open[0] = np.nan
+        previous_high[0] = np.nan
+        previous_low[0] = np.nan
+        previous_close[0] = np.nan
+        
+        # Count valid (non-NaN) values
+        valid_count = len(data) - 1  # All except first candle
+        
+        print(f"   📊 Previous candle OHLC calculated for {valid_count}/{len(data)} candles")
+        print(f"   ⚠️  First candle (index 0) set to NaN - no previous data available")
+        
+        return {
+            'previous_candle_open': previous_open,
+            'previous_candle_high': previous_high,
+            'previous_candle_low': previous_low,
+            'previous_candle_close': previous_close
+        }
     
     # =============================================================================
     # Internal Helper Methods
@@ -736,7 +851,8 @@ class SmartIndicatorEngine:
             'rsi': self._talib_rsi_apply_func,
             'sma': self._talib_sma_apply_func,
             'ema': self._talib_ema_apply_func,
-            'cpr': self._calculate_cpr_numpy_batch
+            'cpr': self._calculate_cpr_numpy_batch,
+            'previous_candle_ohlc': self._calculate_previous_candle_ohlc
         }
         
         return indicator_mappings
@@ -768,6 +884,57 @@ class SmartIndicatorEngine:
             else:
                 available_keys = list(cpr_results.keys())
                 raise ConfigurationError(f"CPR sub-indicator '{indicator_name}' not found. Available: {available_keys}")
+        
+        # SPECIAL HANDLING FOR PREVIOUS DAY INDICATORS (renamed CPR sub-indicators)
+        if indicator_name.startswith('previous_day_'):
+            # Store current data for CPR calculation
+            self._current_ohlcv_data = data
+            
+            # Check if we've already calculated CPR for this data
+            data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
+            
+            if data_hash not in self._cpr_cache:
+                # Calculate all CPR indicators at once
+                cpr_calc_function = self.indicator_functions.get('cpr')
+                if cpr_calc_function is None:
+                    raise ConfigurationError("CPR calculation function not found")
+                
+                print(f"🚀 Ultra-Fast CPR Calculation: Starting for {indicator_name}...")
+                self._cpr_cache[data_hash] = cpr_calc_function(data['close'].values)
+            
+            # Return the specific previous day sub-indicator requested
+            cpr_results = self._cpr_cache[data_hash]
+            if indicator_name in cpr_results:
+                return pd.Series(cpr_results[indicator_name], index=data.index, name=indicator_name)
+            else:
+                available_keys = list(cpr_results.keys())
+                raise ConfigurationError(f"Previous day sub-indicator '{indicator_name}' not found. Available: {available_keys}")
+        
+        # SPECIAL HANDLING FOR PREVIOUS CANDLE OHLC SUB-INDICATORS  
+        if indicator_name.startswith('previous_candle_'):
+            # Store current data for previous candle calculation
+            self._current_ohlcv_data = data
+            
+            # Check if we've already calculated previous candle OHLC for this data
+            data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
+            cache_key = f"prev_candle_{data_hash}"
+            
+            if cache_key not in self._cpr_cache:
+                # Calculate all previous candle OHLC indicators at once
+                prev_calc_function = self.indicator_functions.get('previous_candle_ohlc')
+                if prev_calc_function is None:
+                    raise ConfigurationError("Previous candle OHLC calculation function not found")
+                
+                print(f"🕐 Previous Candle Calculation: Starting for {indicator_name}...")
+                self._cpr_cache[cache_key] = prev_calc_function(data['close'].values)
+            
+            # Return the specific previous candle sub-indicator requested
+            prev_results = self._cpr_cache[cache_key]
+            if indicator_name in prev_results:
+                return pd.Series(prev_results[indicator_name], index=data.index, name=indicator_name)
+            else:
+                available_keys = list(prev_results.keys())
+                raise ConfigurationError(f"Previous candle sub-indicator '{indicator_name}' not found. Available: {available_keys}")
         
         # Parse indicator name for standard indicators (e.g., "rsi_14" -> type="rsi", period=14)
         if '_' in indicator_name:

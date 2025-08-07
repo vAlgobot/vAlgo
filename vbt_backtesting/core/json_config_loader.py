@@ -217,11 +217,28 @@ class JSONConfigLoader:
                     # CPR generates multiple sub-indicators
                     cpr_indicators = [
                         'cpr_pivot', 'cpr_tc', 'cpr_bc', 'cpr_r1', 'cpr_r2', 'cpr_r3', 'cpr_r4',
-                        'cpr_s1', 'cpr_s2', 'cpr_s3', 'cpr_s4', 'cpr_width', 'cpr_range_type',
-                        'cpr_prev_high', 'cpr_prev_low', 'cpr_prev_close'
+                        'cpr_s1', 'cpr_s2', 'cpr_s3', 'cpr_s4', 'cpr_width', 'cpr_range_type', 'cpr_type',
+                        'previous_day_high', 'previous_day_low', 'previous_day_close'
                     ]
                     for cpr_sub in cpr_indicators:
-                        indicator_keys[cpr_sub] = f"CPR {cpr_sub.replace('cpr_', '').upper().replace('_', ' ')}"
+                        if cpr_sub.startswith('previous_day_'):
+                            # Handle previous_day_* indicators with cleaner names
+                            clean_name = cpr_sub.replace('previous_day_', '').upper()
+                            indicator_keys[cpr_sub] = f"Previous Day {clean_name}"
+                        elif cpr_sub == 'cpr_type':
+                            # Handle simplified CPR type indicator
+                            indicator_keys[cpr_sub] = "CPR Type (extreme_narrow/narrow/normal/wide/extreme_wide)"
+                        else:
+                            # Handle regular CPR indicators
+                            indicator_keys[cpr_sub] = f"CPR {cpr_sub.replace('cpr_', '').upper().replace('_', ' ')}"
+                elif indicator_name == 'previous_candle_ohlc':
+                    # Previous candle OHLC generates 4 sub-indicators
+                    prev_ohlc_indicators = [
+                        'previous_candle_open', 'previous_candle_high', 
+                        'previous_candle_low', 'previous_candle_close'
+                    ]
+                    for prev_indicator in prev_ohlc_indicators:
+                        indicator_keys[prev_indicator] = f"Previous candle {prev_indicator.replace('previous_candle_', '').upper()}"
                 else:
                     # Single indicators (VWAP, Bollinger Bands, etc.)
                     indicator_keys[indicator_name] = f"{indicator_name.upper()} indicator"

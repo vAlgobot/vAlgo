@@ -75,6 +75,10 @@
       "calculation_method": "frankochavs_numpy",
       "include_range_type": true,
       "include_support_resistance": true
+    },
+    "previous_candle_ohlc": {
+      "enabled": true,
+      "description": "Previous candle OHLC data"
     }
   },
   "validation": {

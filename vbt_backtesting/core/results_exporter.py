@@ -648,7 +648,7 @@ class ResultsExporter(ProcessorBase):
                     if indicator_type == 'rsi':
                         csv_column = f"RSI_{period}"
                     elif indicator_type == 'sma':
-                        csv_column = f"MA_{period}"  # Keep existing MA naming for SMA
+                        csv_column = f"SMA_{period}"  # Keep existing MA naming for SMA
                     elif indicator_type == 'ema':
                         csv_column = f"EMA_{period}"
                     elif indicator_type == 'vwap':
