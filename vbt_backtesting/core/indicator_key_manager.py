@@ -19,8 +19,9 @@ Based on simplified config-based approach
 
 import json
 import os
+import re
 from pathlib import Path
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List, Tuple
 from datetime import datetime
 import sys
 
@@ -75,6 +76,10 @@ class IndicatorKeyManager:
         # Paths
         self.config_dir = self.config_loader.config_dir
         self.indicator_keys_file = self.config_dir / "indicator_keys.json"
+        
+        # Strategy validation tracking
+        self.validation_cache = {}
+        self.last_validation = None
         
         self.selective_logger.log_major_component("Indicator Key Manager initialized", "INDICATOR_KEYS")
         self.selective_logger.log_detailed(f"Keys file location: {self.indicator_keys_file}", "INFO", "INDICATOR_KEYS")
@@ -327,6 +332,533 @@ class IndicatorKeyManager:
             formatted.append(f"  • {key}: {desc}")
         
         return "\n".join(formatted)
+    
+    def extract_indicator_references(self, expression: str) -> Set[str]:
+        """
+        Extract indicator references from strategy entry/exit expressions.
+        
+        Args:
+            expression: Strategy condition expression
+            
+        Returns:
+            Set of indicator keys referenced in the expression
+        """
+        try:
+            # Pattern to match indicator references:
+            # - Standard format: rsi_14, sma_20, ema_9, etc.
+            # - Market data: close, open, high, low, volume
+            # - Special indicators: previous_day_high, cpr_pivot, etc.
+            pattern = r'\b(?:rsi_\d+|sma_\d+|ema_\d+|ma_\d+|vwap|close|open|high|low|volume|previous_day_\w+|previous_candle_\w+|cpr_\w+)\b'
+            
+            matches = re.findall(pattern, expression, re.IGNORECASE)
+            return set(matches)
+            
+        except Exception as e:
+            # Silent error handling to avoid encoding issues
+            return set()
+    
+    def validate_strategies_against_indicators(self, force_validation: bool = False) -> Dict[str, Any]:
+        """
+        Comprehensive validation of all active strategies against available indicators.
+        
+        Args:
+            force_validation: Force validation even if cached
+            
+        Returns:
+            Comprehensive validation report with all issues and recommendations
+        """
+        try:
+            # Silent validation - no logging to avoid emoji encoding issues
+            
+            # Get current available indicators
+            available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            available_keys = set(available_indicators.keys())
+            
+            # Get active strategies
+            active_strategies = self.config_loader.get_enabled_strategies_cases()
+            
+            validation_report = {
+                'validation_passed': True,
+                'total_strategies_checked': 0,
+                'total_cases_checked': 0,
+                'issues_found': [],
+                'missing_indicators': set(),
+                'strategies_with_issues': [],
+                'available_indicators': available_keys,
+                'config_changes_detected': False,
+                'recommendations': [],
+                'summary': {}
+            }
+            
+            # Check each active strategy group and case
+            for group_name, group_config in active_strategies.items():
+                if group_config.get('status') != 'Active':
+                    continue
+                    
+                validation_report['total_strategies_checked'] += 1
+                cases = group_config.get('cases', {})
+                
+                for case_name, case_config in cases.items():
+                    if case_config.get('status') != 'Active':
+                        continue
+                        
+                    validation_report['total_cases_checked'] += 1
+                    
+                    # Extract entry and exit conditions
+                    entry_condition = case_config.get('entry', '')
+                    exit_condition = case_config.get('exit', '')
+                    
+                    # Extract indicator references from conditions
+                    entry_indicators = self.extract_indicator_references(entry_condition)
+                    exit_indicators = self.extract_indicator_references(exit_condition)
+                    all_indicators = entry_indicators.union(exit_indicators)
+                    
+                    # Check for missing indicators
+                    missing_in_case = all_indicators - available_keys
+                    
+                    if missing_in_case:
+                        validation_report['validation_passed'] = False
+                        validation_report['missing_indicators'].update(missing_in_case)
+                        
+                        issue = {
+                            'strategy_group': group_name,
+                            'case_name': case_name,
+                            'missing_indicators': list(missing_in_case),
+                            'entry_condition': entry_condition,
+                            'exit_condition': exit_condition,
+                            'all_referenced_indicators': list(all_indicators),
+                            'available_alternatives': self._find_indicator_alternatives(missing_in_case, available_keys)
+                        }
+                        
+                        validation_report['issues_found'].append(issue)
+                        
+                        if case_name not in validation_report['strategies_with_issues']:
+                            validation_report['strategies_with_issues'].append(case_name)
+            
+            # Check if indicator configuration has changed
+            validation_report['config_changes_detected'] = self._check_config_changes()
+            
+            # Generate recommendations
+            validation_report['recommendations'] = self._generate_fix_recommendations(validation_report)
+            
+            # Create summary
+            validation_report['summary'] = self._create_validation_summary(validation_report)
+            
+            self.validation_cache = validation_report
+            self.last_validation = datetime.now()
+            
+            # Silent completion - no logging to avoid emoji issues
+            if not validation_report['validation_passed']:
+                # Issues found - will be handled by calling method
+                pass
+            else:
+                # Validation passed - continue silently
+                pass
+            
+            return validation_report
+            
+        except Exception as e:
+            # Silent error handling to avoid logging issues
+            raise ConfigurationError(f"Strategy validation failed: {e}")
+    
+    def _find_indicator_alternatives(self, missing_indicators: Set[str], available_indicators: Set[str]) -> Dict[str, List[str]]:
+        """Find alternative indicators for missing ones."""
+        alternatives = {}
+        
+        for missing in missing_indicators:
+            alts = []
+            
+            # Extract base indicator type (e.g., 'rsi' from 'rsi_14')
+            if '_' in missing:
+                base_type = missing.split('_')[0]
+                # Find available indicators of the same type
+                for available in available_indicators:
+                    if available.startswith(f"{base_type}_"):
+                        alts.append(available)
+            
+            alternatives[missing] = alts
+        
+        return alternatives
+    
+    def _check_config_changes(self) -> bool:
+        """Check if indicator configuration has changed since last validation."""
+        try:
+            config_file = self.config_dir / "config.json"
+            keys_file = self.indicator_keys_file
+            
+            if not keys_file.exists():
+                return True
+            
+            config_mtime = config_file.stat().st_mtime
+            keys_mtime = keys_file.stat().st_mtime
+            
+            return config_mtime > keys_mtime
+            
+        except Exception:
+            return True
+    
+    def _generate_fix_recommendations(self, validation_report: Dict[str, Any]) -> List[str]:
+        """Generate actionable fix recommendations."""
+        recommendations = []
+        
+        if not validation_report['validation_passed']:
+            recommendations.append("⚠️  CRITICAL: Fix strategy configurations before running backtesting")
+            
+            # Specific recommendations for each issue
+            for issue in validation_report['issues_found']:
+                case_name = issue['case_name']
+                missing = issue['missing_indicators']
+                alternatives = issue['available_alternatives']
+                
+                recommendations.append(f"\n🔧 Strategy '{case_name}' fixes needed:")
+                
+                for missing_indicator in missing:
+                    alts = alternatives.get(missing_indicator, [])
+                    if alts:
+                        recommendations.append(f"  • Replace '{missing_indicator}' with one of: {', '.join(alts)}")
+                    else:
+                        recommendations.append(f"  • '{missing_indicator}' not available - enable in config.json or remove from strategy")
+        
+        if validation_report['config_changes_detected']:
+            recommendations.append("\n📋 Configuration changes detected:")
+            recommendations.append("  • indicator_keys.json will be automatically updated")
+            recommendations.append("  • Review strategy references after indicator parameter changes")
+        
+        return recommendations
+    
+    def _create_validation_summary(self, validation_report: Dict[str, Any]) -> Dict[str, Any]:
+        """Create validation summary for display."""
+        return {
+            'total_issues': len(validation_report['issues_found']),
+            'affected_strategies': len(validation_report['strategies_with_issues']),
+            'missing_indicators_count': len(validation_report['missing_indicators']),
+            'validation_status': 'PASSED' if validation_report['validation_passed'] else 'FAILED',
+            'total_available_indicators': len(validation_report['available_indicators'])
+        }
+    
+    def display_validation_report(self, validation_report: Dict[str, Any]) -> None:
+        """
+        Display comprehensive validation report with clear error messages.
+        """
+        print(f"\n{'=' * 80}")
+        print(f"🔍 INDICATOR-STRATEGY VALIDATION REPORT")
+        print(f"{'=' * 80}")
+        
+        summary = validation_report['summary']
+        print(f"📊 VALIDATION SUMMARY:")
+        print(f"   Status: {summary['validation_status']}")
+        print(f"   Strategies Checked: {validation_report['total_strategies_checked']}")
+        print(f"   Cases Checked: {validation_report['total_cases_checked']}")
+        print(f"   Available Indicators: {summary['total_available_indicators']}")
+        
+        if not validation_report['validation_passed']:
+            print(f"\n❌ CRITICAL ISSUES FOUND:")
+            print(f"   Total Issues: {summary['total_issues']}")
+            print(f"   Affected Strategies: {summary['affected_strategies']}")
+            print(f"   Missing Indicators: {summary['missing_indicators_count']}")
+            
+            print(f"\n🚨 DETAILED ISSUES:")
+            for i, issue in enumerate(validation_report['issues_found'], 1):
+                print(f"\n   {i}. Strategy: '{issue['case_name']}' (Group: {issue['strategy_group']})")
+                print(f"      Missing: {', '.join(issue['missing_indicators'])}")
+                print(f"      Entry: {issue['entry_condition']}")
+                print(f"      Exit: {issue['exit_condition']}")
+                
+                # Show alternatives if available
+                for missing_indicator, alternatives in issue['available_alternatives'].items():
+                    if alternatives:
+                        print(f"      💡 '{missing_indicator}' → Available: {', '.join(alternatives)}")
+            
+            print(f"\n🔄 CONFIGURATION CHANGES:")
+            if validation_report['config_changes_detected']:
+                print(f"   ✅ Configuration changes detected - indicator_keys.json will be updated")
+            else:
+                print(f"   ℹ️  No configuration changes detected")
+            
+            print(f"\n💡 RECOMMENDATIONS:")
+            for rec in validation_report['recommendations']:
+                print(f"   {rec}")
+            
+            print(f"\n⚠️  SYSTEM WILL STOP: Fix configurations before continuing")
+        else:
+            print(f"\n✅ ALL VALIDATIONS PASSED")
+            print(f"   All strategy references are valid")
+            print(f"   System ready for backtesting")
+        
+        print(f"\n{'=' * 80}")
+    
+    def validate_and_stop_if_issues(self) -> None:
+        """
+        Main validation method that:
+        1. Updates indicator_keys.json if config changed
+        2. Validates all active strategies 
+        3. Stops execution immediately if issues found
+        4. Provides clear guidance to user
+        
+        Raises:
+            ConfigurationError: If validation fails with simple message
+        """
+        try:
+            print(f"\nVALIDATION: Checking indicator configuration...")
+            
+            # Step 1: Check if config changes detected and update keys file
+            config_changed = self._check_config_changes()
+            if config_changed:
+                print(f"CONFIG UPDATE: Updating indicator_keys.json...")
+                self.save_indicator_keys_json(force_update=True)
+                print(f"UPDATED: indicator_keys.json updated successfully")
+                
+                # Show what changed and newly available keys
+                self._display_config_changes_simple()
+                self._display_newly_available_keys()
+            
+            # Step 2: Run comprehensive validation
+            validation_report = self.validate_strategies_against_indicators()
+            
+            # Step 3: If validation passed, continue silently
+            if validation_report['validation_passed']:
+                if config_changed:
+                    print(f"SUCCESS: All configurations validated - system ready")
+                return  # Continue execution
+            
+            # Step 4: If validation failed, show simple clear message and stop
+            print(f"\nPROBLEM DETECTED: Strategy configuration issues found")
+            
+            # Always show available keys for user reference
+            if not config_changed:
+                print(f"\nCURRENT AVAILABLE INDICATOR KEYS:")
+                self._display_available_keys_summary()
+            
+            # Show simple, actionable information
+            self._display_simple_validation_issues(validation_report)
+            
+            # Create simple error message for ConfigurationError
+            error_msg = self._create_simple_error_message(validation_report)
+            
+            # Stop execution immediately
+            raise ConfigurationError(error_msg)
+            
+        except ConfigurationError:
+            # Re-raise configuration errors (our intentional stops)
+            raise
+        except Exception as e:
+            # Handle unexpected errors with simple message
+            error_msg = f"Validation error: {e}"
+            print(f"ERROR: {error_msg}")
+            raise ConfigurationError(error_msg)
+    
+    def _display_config_changes(self) -> None:
+        """Display what indicator parameters changed."""
+        try:
+            # Get old and new configurations for comparison
+            main_config = self.config_loader.get_main_config()
+            indicators_config = main_config.get('indicators', {})
+            
+            print(f"\n🔄 INDICATOR CHANGES DETECTED:")
+            
+            # Show current config parameters
+            for indicator_name, indicator_config in indicators_config.items():
+                if isinstance(indicator_config, dict) and indicator_config.get('enabled', False):
+                    periods = indicator_config.get('periods', [])
+                    if periods:
+                        print(f"   • {indicator_name.upper()}: {periods} → creates {', '.join([f'{indicator_name}_{p}' for p in periods])}")
+                    else:
+                        print(f"   • {indicator_name.upper()}: enabled (no periods)")
+            
+        except Exception as e:
+            print(f"   ⚠️  Could not display config changes: {e}")
+    
+    def _create_detailed_error_message(self, validation_report: Dict[str, Any]) -> str:
+        """Create detailed error message for ConfigurationError."""
+        
+        error_lines = [
+            "\n🚨 STRATEGY-INDICATOR VALIDATION FAILED",
+            "=" * 60,
+            ""
+        ]
+        
+        # Summary of issues
+        summary = validation_report['summary']
+        error_lines.extend([
+            f"📊 ISSUES FOUND:",
+            f"   • {summary['total_issues']} validation errors",
+            f"   • {summary['affected_strategies']} strategies affected", 
+            f"   • {summary['missing_indicators_count']} indicators missing",
+            ""
+        ])
+        
+        # Specific issues
+        error_lines.append("🔴 SPECIFIC ISSUES:")
+        for issue in validation_report['issues_found']:
+            error_lines.extend([
+                f"   Strategy: '{issue['case_name']}' (Group: {issue['strategy_group']})",
+                f"   Missing: {', '.join(issue['missing_indicators'])}",
+                f"   Entry: {issue['entry_condition']}",
+                f"   Exit: {issue['exit_condition']}",
+                ""
+            ])
+        
+        # Available alternatives  
+        error_lines.append("💡 AVAILABLE ALTERNATIVES:")
+        all_alternatives = {}
+        for issue in validation_report['issues_found']:
+            all_alternatives.update(issue['available_alternatives'])
+        
+        for missing, alternatives in all_alternatives.items():
+            if alternatives:
+                error_lines.append(f"   • Replace '{missing}' with: {', '.join(alternatives)}")
+            else:
+                error_lines.append(f"   • '{missing}' - Enable in config.json or remove from strategy")
+        
+        error_lines.extend([
+            "",
+            "🛠️  REQUIRED ACTIONS:",
+            "   1. Update strategies.json with valid indicator references",
+            "   2. OR modify config.json to include missing indicators", 
+            "   3. OR disable strategies that use unavailable indicators",
+            "",
+            "✅ GOOD NEWS: indicator_keys.json has been updated automatically",
+            "",
+            "⚠️  SYSTEM STOPPED: Fix strategy configurations before continuing",
+            "=" * 60
+        ])
+        
+        return "\n".join(error_lines)
+    
+    def _display_simple_validation_issues(self, validation_report: Dict[str, Any]) -> None:
+        """Display simple, clear validation issues without overwhelming detail."""
+        try:
+            issues = validation_report['issues_found']
+            
+            print(f"\nISSUES FOUND:")
+            for i, issue in enumerate(issues, 1):
+                missing_indicators = issue['missing_indicators']
+                case_name = issue['case_name']
+                alternatives = issue['available_alternatives']
+                
+                print(f"  {i}. Strategy '{case_name}' uses: {', '.join(missing_indicators)} - NOT AVAILABLE")
+                
+                # Show unique alternatives for all missing indicators
+                all_alternatives = set()
+                for missing_indicator in missing_indicators:
+                    available_alts = alternatives.get(missing_indicator, [])
+                    all_alternatives.update(available_alts)
+                
+                if all_alternatives:
+                    print(f"     Available instead: {', '.join(sorted(all_alternatives))}")
+                else:
+                    print(f"     No alternatives found")
+            
+            print(f"\nSOLUTIONS:")
+            print(f"  1. Edit strategies.json - Replace missing indicators with available ones")
+            print(f"  2. Edit config.json - Add missing indicators to periods list") 
+            print(f"  3. Disable strategies that use unavailable indicators")
+            
+            print(f"\nSYSTEM STOPPED: Fix configuration and try again")
+            
+        except Exception as e:
+            print(f"Error displaying issues: {e}")
+    
+    def _create_simple_error_message(self, validation_report: Dict[str, Any]) -> str:
+        """Create simple error message without emojis or complex formatting."""
+        
+        issues = validation_report['issues_found']
+        missing_indicators = validation_report['missing_indicators']
+        
+        error_parts = [
+            "Strategy configuration validation failed",
+            f"Missing indicators: {', '.join(missing_indicators)}",
+            f"Affected strategies: {len(issues)}",
+            "Fix strategies.json or config.json before continuing"
+        ]
+        
+        return " - ".join(error_parts)
+    
+    def _display_newly_available_keys(self) -> None:
+        """Display newly available indicator keys for user reference."""
+        try:
+            # Get current available indicators
+            available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            
+            print(f"\nNEWLY AVAILABLE INDICATOR KEYS:")
+            
+            # Group by indicator type for better display
+            indicator_groups = {}
+            for key, description in available_indicators.items():
+                # Skip market data keys
+                if key in ['close', 'open', 'high', 'low', 'volume']:
+                    continue
+                    
+                # Extract base indicator type (e.g., 'rsi' from 'rsi_10')
+                if '_' in key:
+                    base_type = key.split('_')[0].upper()
+                else:
+                    base_type = key.upper()
+                
+                if base_type not in indicator_groups:
+                    indicator_groups[base_type] = []
+                indicator_groups[base_type].append(key)
+            
+            # Display grouped indicators
+            for indicator_type, keys in sorted(indicator_groups.items()):
+                if keys:
+                    keys_display = ", ".join(sorted(keys))
+                    print(f"  {indicator_type}: {keys_display}")
+            
+            print(f"  Total available: {len(available_indicators)} keys")
+            
+        except Exception as e:
+            print(f"  Error displaying available keys: {e}")
+    
+    def _display_config_changes_simple(self) -> None:
+        """Display what indicator parameters changed in a simple format."""
+        try:
+            main_config = self.config_loader.get_main_config()
+            indicators_config = main_config.get('indicators', {})
+            
+            print(f"\nCONFIG CHANGES APPLIED:")
+            
+            # Show current enabled indicators with their periods
+            for indicator_name, indicator_config in indicators_config.items():
+                if isinstance(indicator_config, dict) and indicator_config.get('enabled', False):
+                    periods = indicator_config.get('periods', [])
+                    if periods:
+                        indicator_keys = [f"{indicator_name}_{p}" for p in periods]
+                        print(f"  {indicator_name.upper()}: {periods} -> creates {', '.join(indicator_keys)}")
+                    else:
+                        print(f"  {indicator_name.upper()}: enabled")
+            
+        except Exception as e:
+            print(f"  Error displaying config changes: {e}")
+    
+    def _display_available_keys_summary(self) -> None:
+        """Display a summary of currently available keys."""
+        try:
+            available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            
+            # Group by indicator type
+            indicator_groups = {}
+            for key, description in available_indicators.items():
+                if key in ['close', 'open', 'high', 'low', 'volume']:
+                    continue
+                    
+                if '_' in key:
+                    base_type = key.split('_')[0].upper()
+                else:
+                    base_type = key.upper()
+                
+                if base_type not in indicator_groups:
+                    indicator_groups[base_type] = []
+                indicator_groups[base_type].append(key)
+            
+            # Display in compact format
+            for indicator_type, keys in sorted(indicator_groups.items()):
+                if keys:
+                    keys_display = ", ".join(sorted(keys))
+                    print(f"  {indicator_type}: {keys_display}")
+            
+        except Exception as e:
+            print(f"  Error displaying available keys: {e}")
 
 
 # Convenience functions for external use

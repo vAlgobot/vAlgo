@@ -1,9 +1,9 @@
 {
   "metadata": {
-    "generated_at": "2025-08-06T11:57:19.059840",
+    "generated_at": "2025-08-11T11:55:52.279040",
     "version": "1.0",
     "approach": "config_based_simple",
-    "total_keys": 31,
+    "total_keys": 34,
     "source": "config.json enabled indicators"
   },
   "market_data_keys": {
@@ -14,15 +14,13 @@
     "volume": "Volume series"
   },
   "calculated_indicators": {
-    "rsi_14": "RSI with 14 period",
-    "rsi_21": "RSI with 21 period",
-    "sma_9": "SMA with 9 period",
-    "sma_20": "SMA with 20 period",
+    "rsi_10": "RSI with 10 period",
+    "rsi_20": "RSI with 20 period",
+    "sma_10": "SMA with 10 period",
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
-    "ema_9": "EMA with 9 period",
+    "ema_10": "EMA with 10 period",
     "ema_20": "EMA with 20 period",
-    "ema_50": "EMA with 50 period",
     "ema_200": "EMA with 200 period",
     "cpr_pivot": "CPR PIVOT",
     "cpr_tc": "CPR TC",
@@ -37,9 +35,14 @@
     "cpr_s4": "CPR S4",
     "cpr_width": "CPR WIDTH",
     "cpr_range_type": "CPR RANGE TYPE",
-    "cpr_prev_high": "CPR PREV HIGH",
-    "cpr_prev_low": "CPR PREV LOW",
-    "cpr_prev_close": "CPR PREV CLOSE"
+    "cpr_type": "CPR Type (extreme_narrow/narrow/normal/wide/extreme_wide)",
+    "previous_day_high": "Previous Day HIGH",
+    "previous_day_low": "Previous Day LOW",
+    "previous_day_close": "Previous Day CLOSE",
+    "previous_candle_open": "Previous candle OPEN",
+    "previous_candle_high": "Previous candle HIGH",
+    "previous_candle_low": "Previous candle LOW",
+    "previous_candle_close": "Previous candle CLOSE"
   },
   "all_available_keys": {
     "close": "Closing price series",
@@ -47,15 +50,13 @@
     "high": "High price series",
     "low": "Low price series",
     "volume": "Volume series",
-    "rsi_14": "RSI with 14 period",
-    "rsi_21": "RSI with 21 period",
-    "sma_9": "SMA with 9 period",
-    "sma_20": "SMA with 20 period",
+    "rsi_10": "RSI with 10 period",
+    "rsi_20": "RSI with 20 period",
+    "sma_10": "SMA with 10 period",
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
-    "ema_9": "EMA with 9 period",
+    "ema_10": "EMA with 10 period",
     "ema_20": "EMA with 20 period",
-    "ema_50": "EMA with 50 period",
     "ema_200": "EMA with 200 period",
     "cpr_pivot": "CPR PIVOT",
     "cpr_tc": "CPR TC",
@@ -70,9 +71,14 @@
     "cpr_s4": "CPR S4",
     "cpr_width": "CPR WIDTH",
     "cpr_range_type": "CPR RANGE TYPE",
-    "previous_day_high": "CPR PREV HIGH",
-    "previous_day_low": "CPR PREV LOW",
-    "previous_day_close": "CPR PREV CLOSE"
+    "cpr_type": "CPR Type (extreme_narrow/narrow/normal/wide/extreme_wide)",
+    "previous_day_high": "Previous Day HIGH",
+    "previous_day_low": "Previous Day LOW",
+    "previous_day_close": "Previous Day CLOSE",
+    "previous_candle_open": "Previous candle OPEN",
+    "previous_candle_high": "Previous candle HIGH",
+    "previous_candle_low": "Previous candle LOW",
+    "previous_candle_close": "Previous candle CLOSE"
   },
   "usage_examples": {
     "simple_condition": "close > ma_20",
@@ -85,14 +91,14 @@
       "rsi": {
         "enabled": true,
         "periods": [
-          14,
-          21
+          10,
+          20
         ],
         "talib_function": "RSI",
         "config": {
           "periods": [
-            14,
-            21
+            10,
+            20
           ],
           "talib_function": "RSI"
         }
@@ -100,16 +106,14 @@
       "sma": {
         "enabled": true,
         "periods": [
-          9,
-          20,
+          10,
           50,
           200
         ],
         "talib_function": "SMA",
         "config": {
           "periods": [
-            9,
-            20,
+            10,
             50,
             200
           ],
@@ -119,17 +123,15 @@
       "ema": {
         "enabled": true,
         "periods": [
-          9,
+          10,
           20,
-          50,
           200
         ],
         "talib_function": "EMA",
         "config": {
           "periods": [
-            9,
+            10,
             20,
-            50,
             200
           ],
           "talib_function": "EMA"
@@ -144,6 +146,14 @@
           "calculation_method": "frankochavs_numpy",
           "include_range_type": true,
           "include_support_resistance": true
+        }
+      },
+      "previous_candle_ohlc": {
+        "enabled": true,
+        "periods": [],
+        "talib_function": null,
+        "config": {
+          "description": "Previous candle OHLC data"
         }
       }
     },

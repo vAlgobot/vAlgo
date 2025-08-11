@@ -232,6 +232,9 @@ class UltimateEfficiencyEngine:
             self.selective_logger.log_major_component("Ultimate Efficiency Analysis starting", "SYSTEM")
             analysis_start = time.time()
             
+            # CRITICAL: Pre-execution validation - must be first step
+            self.key_manager.validate_and_stop_if_issues()
+            
             # Set dates from config if not provided
             start_date = start_date or self.main_config['backtesting']['start_date']
             end_date = end_date or self.main_config['backtesting']['end_date']
@@ -460,7 +463,12 @@ class UltimateEfficiencyEngine:
             
             return results
             
+        except ConfigurationError as e:
+            # Configuration errors are user-actionable - show clean message
+            print(f"\nCONFIGURATION ERROR: {str(e)}")
+            raise  # Re-raise without wrapping
         except Exception as e:
+            # Unexpected errors - log and wrap
             self.selective_logger.log_detailed(f"Ultimate Efficiency Analysis failed: {e}", "ERROR", "SYSTEM")
             raise ConfigurationError(f"Analysis execution failed: {e}")
     

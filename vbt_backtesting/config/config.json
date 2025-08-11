@@ -47,17 +47,17 @@
     "require_complete_calculation": true,
     "rsi": {
       "enabled": true,
-      "periods": [14, 21],
+      "periods": [10, 20],
       "talib_function": "RSI"
     },
     "sma": {
       "enabled": true,
-      "periods": [9, 20, 50, 200],
+      "periods": [10, 50, 200],
       "talib_function": "SMA"
     },
     "ema": {
       "enabled": true,
-      "periods": [9, 20,50,200],
+      "periods": [10, 20,200],
       "talib_function": "EMA"
     },
     "vwap": {
