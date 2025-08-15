@@ -355,6 +355,128 @@ class EfficientDataLoader:
             self.logger.log_detailed(f"Error loading warmup-extended data for {symbol}: {e}", "ERROR", "DATA_LOADER")
             raise ConfigurationError(f"Warmup-extended data loading failed: {e}")
     
+    def get_ltp_timeframe_data(
+        self, 
+        symbol: str, 
+        exchange: str, 
+        start_date: str, 
+        end_date: str
+    ) -> pd.DataFrame:
+        """
+        Retrieve 1m LTP timeframe data for multi-timeframe analysis.
+        
+        Calculates adjusted start time based on trading_start_time + global_timeframe
+        to avoid overlap with incomplete 5m candles and prevent lookahead bias.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'NIFTY')
+            exchange: Exchange name (e.g., 'NSE_INDEX')
+            start_date: Original backtest start date
+            end_date: Backtest end date
+            
+        Returns:
+            DataFrame with 1m OHLCV data starting from adjusted time
+        """
+        try:
+            from datetime import datetime, timedelta
+            
+            # Get configuration parameters
+            trading_config = self.main_config.get('trading', {})
+            risk_config = self.main_config.get('risk_management', {})
+            
+            global_timeframe = trading_config.get('timeframe', '5m')
+            trading_start_time_str = risk_config.get('trading_start_time', '09:20')
+            
+            # Parse global timeframe to get minutes offset
+            if global_timeframe.endswith('m'):
+                timeframe_minutes = int(global_timeframe[:-1])
+            else:
+                timeframe_minutes = 5  # Default fallback
+            
+            # Calculate adjusted start time: trading_start_time + global_timeframe
+            # Example: 09:20 + 5m = 09:25 (start 1m data from when 5m candle is complete)
+            hour, minute = map(int, trading_start_time_str.split(':'))
+            base_time = datetime.strptime(start_date, '%Y-%m-%d').replace(hour=hour, minute=minute)
+            adjusted_start_time = base_time + timedelta(minutes=timeframe_minutes)
+            
+            # Build adjusted start date string for query
+            adjusted_start_date = adjusted_start_time.strftime('%Y-%m-%d')
+            adjusted_start_time_filter = adjusted_start_time.strftime('%H:%M:%S')
+            
+            self.logger.log_detailed(
+                f"LTP timeframe data calculation: {trading_start_time_str} + {global_timeframe} = {adjusted_start_time.strftime('%H:%M')}", 
+                "INFO", "DATA_LOADER"
+            )
+            
+            print(f"🕒 LTP Timeframe Data Fetch:")
+            print(f"   Trading start: {trading_start_time_str}")
+            print(f"   Global timeframe: {global_timeframe}")
+            print(f"   Adjusted start: {adjusted_start_time.strftime('%H:%M')} (no warmup)")
+            print(f"   Date range: {adjusted_start_date} to {end_date}")
+            
+            # Query 1m data starting from adjusted time
+            # Use parameterized table name to avoid SQL injection issues
+            table_name = self.ohlcv_table
+            if not table_name or not isinstance(table_name, str):
+                raise ConfigurationError(f"Invalid table name: {table_name}")
+            
+            query = f"""
+            SELECT timestamp, open, high, low, close, volume
+            FROM {table_name}
+            WHERE symbol = ? AND exchange = ? AND timeframe = '1m'
+            AND timestamp >= ?
+            AND timestamp <= ?
+            ORDER BY timestamp
+            """
+            
+            # Build full timestamp strings with proper time filtering
+            adjusted_start_timestamp = f"{adjusted_start_date} {adjusted_start_time_filter}"
+            end_timestamp = f"{end_date} 23:59:59"
+            
+            params = [
+                symbol.upper(), 
+                exchange.upper(), 
+                adjusted_start_timestamp,
+                end_timestamp
+            ]
+            
+            start_time = datetime.now()
+            result_df = self.connection.execute(query, params).fetchdf()
+            query_time = (datetime.now() - start_time).total_seconds()
+            
+            if result_df.empty:
+                self.logger.log_detailed(f"No 1m LTP data found for {symbol} from {adjusted_start_date}", "WARNING", "DATA_LOADER")
+                return pd.DataFrame()
+            
+            # Set timestamp as index for consistency
+            result_df['timestamp'] = pd.to_datetime(result_df['timestamp'])
+            result_df = result_df.set_index('timestamp')
+            
+            # Update query stats
+            self.query_stats['individual_queries'] += 1
+            self.query_stats['total_queries'] += 1
+            
+            print(f"✅ LTP timeframe data loaded: {len(result_df)} records in {query_time:.3f}s")
+            print(f"   📊 Symbol: {symbol}, Timeframe: 1m")
+            print(f"   📅 Time Range: {result_df.index[0]} to {result_df.index[-1]}")
+            print(f"   💰 Price Range: {result_df['close'].min():.2f} - {result_df['close'].max():.2f}")
+            
+            # Validate start time alignment
+            actual_start_time = result_df.index[0].time()
+            expected_start_time = adjusted_start_time.time()
+            
+            if actual_start_time != expected_start_time:
+                self.logger.log_detailed(
+                    f"LTP data start time mismatch: expected {expected_start_time}, got {actual_start_time}", 
+                    "WARNING", "DATA_LOADER"
+                )
+            
+            return result_df
+            
+        except Exception as e:
+            self.logger.log_detailed(f"Error loading LTP timeframe data for {symbol}: {e}", "ERROR", "DATA_LOADER")
+            raise ConfigurationError(f"LTP timeframe data loading failed: {e}")
+
     def get_warmup_requirements(self, start_date: str) -> Dict[str, Any]:
         """
         Get warmup requirements for a given start date.

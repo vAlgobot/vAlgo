@@ -187,17 +187,33 @@ class JSONConfigLoader:
         Returns:
             Dictionary mapping indicator keys to descriptions
         """
+        # Get main config for dynamic key generation
+        main_config = self.get_main_config()
+        
+        # Check if LTP mode is enabled for dynamic key generation
+        ltp_enabled = main_config.get('trading', {}).get('ltp_timeframe', False)
+        
+        # Base market data keys (always available)
         indicator_keys = {
-            # Market data keys (always available)
-            'close': 'Closing price series',
-            'open': 'Opening price series', 
-            'high': 'High price series',
-            'low': 'Low price series',
-            'volume': 'Volume series'
+            'close': 'Closing price series (5m)',
+            'open': 'Opening price series (5m)', 
+            'high': 'High price series (5m)',
+            'low': 'Low price series (5m)',
+            'volume': 'Volume series (5m)'
         }
         
+        # Add LTP keys dynamically when LTP mode is enabled
+        if ltp_enabled:
+            indicator_keys.update({
+                'ltp_open': '1-minute opening price for execution timing',
+                'ltp_high': '1-minute high price for breakout detection',
+                'ltp_low': '1-minute low price for breakdown detection',
+                'ltp_close': '1-minute closing price for execution confirmation',
+                'ltp_volume': '1-minute volume for execution validation',
+                'Indicator_Timestamp': 'Timestamp of 5m candle providing indicators (debugging)'
+            })
+        
         # Add enabled indicators from config.json
-        main_config = self.get_main_config()
         for indicator_name, indicator_config in main_config['indicators'].items():
             # Skip non-indicator config keys
             if indicator_name in ['allow_numpy_fallback', 'require_complete_calculation']:

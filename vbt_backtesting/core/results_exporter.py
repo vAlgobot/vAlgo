@@ -692,10 +692,9 @@ class ResultsExporter(ProcessorBase):
                     df.iloc[entry_index, df.columns.get_loc('Strategy_Signals')] = 1
                     df.iloc[entry_index, df.columns.get_loc('Strategy_Signal_Text')] = 'Entry'
                     
-                    # Add signal adjusted timestamp for tracking
-                    adjusted_timestamp = entry.get('timestamp')  # This is the adjusted timestamp from signal_extractor
-                    if adjusted_timestamp:
-                        df.iloc[entry_index, df.columns.get_loc('Signal_Adjusted_Timestamp')] = adjusted_timestamp
+                    # Add signal adjusted timestamp for tracking (use DataFrame index timestamp - same row)
+                    row_timestamp = df.index[entry_index]  # Use the actual row timestamp
+                    df.iloc[entry_index, df.columns.get_loc('Signal_Adjusted_Timestamp')] = row_timestamp
             
             # Mark exit signals with adjusted timestamps
             for exit in exits_list:
@@ -705,10 +704,9 @@ class ResultsExporter(ProcessorBase):
                     df.iloc[exit_index, df.columns.get_loc('Strategy_Signals')] = -1
                     df.iloc[exit_index, df.columns.get_loc('Strategy_Signal_Text')] = 'Exit'
                     
-                    # Add signal adjusted timestamp for tracking
-                    adjusted_timestamp = exit.get('timestamp')  # This is the adjusted timestamp from signal_extractor
-                    if adjusted_timestamp:
-                        df.iloc[exit_index, df.columns.get_loc('Signal_Adjusted_Timestamp')] = adjusted_timestamp
+                    # Add signal adjusted timestamp for tracking (use DataFrame index timestamp - same row)
+                    row_timestamp = df.index[exit_index]  # Use the actual row timestamp
+                    df.iloc[exit_index, df.columns.get_loc('Signal_Adjusted_Timestamp')] = row_timestamp
             
             entry_count = df['Entry_Signal'].sum()
             exit_count = df['Exit_Signal'].sum()

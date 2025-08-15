@@ -309,50 +309,143 @@ class UltimateEfficiencyEngine:
             print(f"   🎯 Filtered (backtest only): {len(filtered_market_data):,} records")
             print(f"   ⚡ Efficiency gain: {warmup_records:,} records saved ({warmup_records/len(market_data)*100:.1f}%)")
             
-            # Phase 3: VectorBT Signal Generation (Modular) - using filtered data
+            # Phase 3: Pre-Build Multi-Timeframe Context (ULTRA OPTIMIZATION)
+            context_build_start = time.time()
+            trading_config = self.main_config.get('trading', {})
+            ltp_timeframe_enabled = trading_config.get('ltp_timeframe', False)
+            
+            if ltp_timeframe_enabled:
+                print("🚀 PERFORMANCE: Building multi-timeframe context ONCE in main engine...")
+                shared_eval_context, shared_merged_data = self.signal_generator._build_multi_timeframe_context(
+                    filtered_market_data, filtered_indicators
+                )
+                context_build_time = time.time() - context_build_start
+                print(f"🚀 PERFORMANCE: Context built in {context_build_time:.3f}s")
+            else:
+                print("🚀 PERFORMANCE: Building single-timeframe context ONCE in main engine...")
+                shared_eval_context = {
+                    'close': filtered_market_data['close'],
+                    'open': filtered_market_data['open'],
+                    'high': filtered_market_data['high'],
+                    'low': filtered_market_data['low'],
+                    'volume': filtered_market_data['volume'],
+                    **filtered_indicators  # Add all calculated indicators
+                }
+                shared_merged_data = None
+                context_build_time = time.time() - context_build_start
+                print(f"🚀 PERFORMANCE: Context built in {context_build_time:.3f}s")
+            
+            # Add numpy for mathematical operations
+            shared_eval_context['np'] = np
+            
+            # Phase 3: VectorBT Signal Generation (Modular) - using pre-built context
             signal_start = time.time()
-            vectorbt_signals = self.signal_generator.generate_signals(filtered_market_data, filtered_indicators)
+            signal_generation_result = self.signal_generator.generate_signals_with_context(
+                filtered_market_data, filtered_indicators, shared_eval_context, shared_merged_data
+            )
             self.performance_stats['signal_generation_time'] = time.time() - signal_start
+            self.performance_stats['context_build_time'] = context_build_time
+            
+            # Extract signals and merged_data from the result
+            if isinstance(signal_generation_result, dict) and 'signals' in signal_generation_result:
+                # New format with merged_data support
+                vectorbt_signals = signal_generation_result['signals']
+                merged_data_for_reports = signal_generation_result.get('merged_data')
+            else:
+                # Backward compatibility - old format (direct signals dictionary)
+                vectorbt_signals = signal_generation_result
+                merged_data_for_reports = None
+            
+            # Phase 3.5: Multi-Timeframe Validation (if LTP timeframe enabled)
+            # trading_config = self.main_config.get('trading', {})
+            # if trading_config.get('ltp_timeframe', False):
+            #     self.selective_logger.log_major_component("Running multi-timeframe validation", "VALIDATION")
+            #     validation_result = self.signal_generator.validate_multi_timeframe_implementation()
+                
+            #     if validation_result.get('validation_status') == 'PASSED':
+            #         self.selective_logger.log_major_component("Multi-timeframe validation: PASSED", "VALIDATION")
+            #     else:
+            #         self.selective_logger.log_major_component(f"Multi-timeframe validation: {validation_result.get('validation_status', 'UNKNOWN')}", "VALIDATION")
+            #         if validation_result.get('error'):
+            #             self.selective_logger.log_detailed(f"Validation error: {validation_result['error']}", "WARNING", "VALIDATION")
             
             # Phase 4: Entry/Exit Signal Extraction (Modular) - using filtered data
             extraction_start = time.time()
-            trade_signals = self.signal_extractor.extract_signals(vectorbt_signals, filtered_market_data, timeframe)
+            
+            # Determine the effective timeframe and data for signal extraction and reporting
+            # When LTP timeframe is enabled, signals are evaluated on 1m data
+            trading_config = self.main_config.get('trading', {})
+            ltp_timeframe_enabled = trading_config.get('ltp_timeframe', False)
+            
+            if ltp_timeframe_enabled:
+                effective_timeframe = "1m"  # Signals are generated on 1m timestamps
+                self.selective_logger.log_detailed("Using 1m timeframe for signal extraction (LTP mode)", "INFO", "TIMEFRAME")
+                
+                # Use merged_data for reporting if available, otherwise use filtered data
+                if merged_data_for_reports is not None:
+                    reporting_market_data = merged_data_for_reports
+                    reporting_indicators = {}  # Indicators are already included in merged_data columns
+                    self.selective_logger.log_detailed(f"Using merged 1m data for reports: {len(reporting_market_data)} records", "INFO", "REPORTING")
+                    print(f"   📊 Using merged 1m data for reports: {len(reporting_market_data):,} records")
+                else:
+                    reporting_market_data = filtered_market_data
+                    reporting_indicators = filtered_indicators
+                    self.selective_logger.log_detailed("Merged data not available, using filtered 5m data", "WARNING", "REPORTING")
+            else:
+                effective_timeframe = timeframe  # Use global timeframe
+                reporting_market_data = filtered_market_data
+                reporting_indicators = filtered_indicators
+                self.selective_logger.log_detailed(f"Using {timeframe} timeframe for signal extraction (standard mode)", "INFO", "TIMEFRAME")
+            
+            trade_signals = self.signal_extractor.extract_signals(vectorbt_signals, filtered_market_data, effective_timeframe)
             self.performance_stats['trade_extraction_time'] = time.time() - extraction_start
             
             # Phase 5: Options P&L Calculation (Modular)
             pnl_start = time.time()
             
-            # Extract parameters for options P&L calculation - using filtered data
-            close_prices = filtered_market_data['close']
-            timestamps = filtered_market_data.index
+            # Extract parameters for options P&L calculation - using reporting data
+            close_prices = reporting_market_data['close'] if 'close' in reporting_market_data.columns else reporting_market_data['1m_close']
+            timestamps = reporting_market_data.index
             
             # Extract entry/exit signals from trade_signals
-            # Create empty boolean Series as default - using filtered data index
-            entries = pd.Series(False, index=filtered_market_data.index, name='entries')
-            exits = pd.Series(False, index=filtered_market_data.index, name='exits')
+            # Create empty boolean Series as default - using reporting data index
+            entries = pd.Series(False, index=reporting_market_data.index, name='entries')
+            exits = pd.Series(False, index=reporting_market_data.index, name='exits')
             
             # Convert signal lists to boolean Series
             if 'entries' in trade_signals and len(trade_signals['entries']) > 0:
-                # Extract indices from entry signal dictionaries
-                entry_indices = [signal['index'] for signal in trade_signals['entries']]
-                entries.iloc[entry_indices] = True
-                print(f"   📈 Converted {len(entry_indices)} entry signals to Series")
+                # Extract timestamps from entry signal dictionaries and map to reporting index
+                for signal in trade_signals['entries']:
+                    signal_timestamp = signal['timestamp']
+                    if signal_timestamp in reporting_market_data.index:
+                        # Get the position in reporting_market_data index
+                        reporting_position = reporting_market_data.index.get_loc(signal_timestamp)
+                        entries.iloc[reporting_position] = True
+                
+                entry_count = entries.sum()
+                print(f"   📈 Converted {len(trade_signals['entries'])} entry signals → {entry_count} mapped to reporting data")
                     
             if 'exits' in trade_signals and len(trade_signals['exits']) > 0:
-                # Extract indices from exit signal dictionaries  
-                exit_indices = [signal['index'] for signal in trade_signals['exits']]
-                exits.iloc[exit_indices] = True
-                print(f"   📉 Converted {len(exit_indices)} exit signals to Series")
+                # Extract timestamps from exit signal dictionaries and map to reporting index
+                for signal in trade_signals['exits']:
+                    signal_timestamp = signal['timestamp']
+                    if signal_timestamp in reporting_market_data.index:
+                        # Get the position in reporting_market_data index
+                        reporting_position = reporting_market_data.index.get_loc(signal_timestamp)
+                        exits.iloc[reporting_position] = True
+                
+                exit_count = exits.sum()
+                print(f"   📉 Converted {len(trade_signals['exits'])} exit signals → {exit_count} mapped to reporting data")
             
             options_pnl = self.options_pnl_calculator.calculate_pnl_with_signals(
                 close_prices, trade_signals, strategy_name="TrendFollow"
             )
             self.performance_stats['pnl_calculation_time'] = time.time() - pnl_start
             
-            # Phase 6: Results Compilation (Modular) - using filtered data
+            # Phase 6: Results Compilation (Modular) - using reporting data
             compile_start = time.time()
             results = self.results_compiler.compile_results(
-                filtered_market_data, filtered_indicators, trade_signals, options_pnl
+                reporting_market_data, reporting_indicators, trade_signals, options_pnl
             )
             self.performance_stats['results_compilation_time'] = time.time() - compile_start
             
@@ -425,7 +518,7 @@ class UltimateEfficiencyEngine:
             # Phase 7: Results Export (Modular)
             if enable_export:
                 export_start = time.time()
-                self.results_exporter.export_results(results, symbol, timeframe, start_date, end_date)
+                self.results_exporter.export_results(results, symbol, effective_timeframe, start_date, end_date)
                 self.performance_stats['export_time'] = time.time() - export_start
             
             # Calculate final performance metrics using complete execution time (from very beginning)
@@ -433,7 +526,7 @@ class UltimateEfficiencyEngine:
             self.performance_stats['total_processing_time'] = total_time
             
             if total_time > 0:
-                self.performance_stats['records_per_second'] = len(filtered_market_data) / total_time
+                self.performance_stats['records_per_second'] = len(reporting_market_data) / total_time
                 baseline_speed = 1120  # records/second baseline
                 self.performance_stats['performance_multiplier'] = self.performance_stats['records_per_second'] / baseline_speed
                 self.performance_stats['target_achievement_percentage'] = (self.performance_stats['performance_multiplier'] / 5) * 100
@@ -452,7 +545,7 @@ class UltimateEfficiencyEngine:
             final_performance = {
                 'analysis_completed': True,
                 'total_time': f"{total_time:.3f}s",
-                'records_processed': f"{len(market_data):,}",
+                'records_processed': f"{len(reporting_market_data):,}",
                 'processing_speed': f"{self.performance_stats['records_per_second']:,.0f} records/sec",
                 'performance_multiplier': f"{self.performance_stats['performance_multiplier']:.1f}x baseline",
                 'target_achievement': f"{self.performance_stats['target_achievement_percentage']:.1f}% of 5x target"

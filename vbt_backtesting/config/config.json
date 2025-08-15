@@ -5,6 +5,7 @@
     "logging_level": "INFO",
     "performance_target": "5-10x",
     "architecture": "ultimate_efficiency",
+    "performance_mode": "ultra",
     "logger_config": {
       "enabled": true,
       "session_name": "vbt_backtesting",
@@ -14,6 +15,7 @@
   "trading": {
     "symbol": "NIFTY",
     "exchange": "NSE_INDEX",
+    "ltp_timeframe": true,
     "timeframe": "5m",
     "lot_size": 75,
     "initial_capital": 100000,
@@ -35,7 +37,7 @@
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2024-06-01",
+    "start_date": "2025-06-01",
     "end_date": "2025-06-30", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,
@@ -52,12 +54,12 @@
     },
     "sma": {
       "enabled": true,
-      "periods": [10, 50, 200],
+      "periods": [10, 20, 50, 200],
       "talib_function": "SMA"
     },
     "ema": {
       "enabled": true,
-      "periods": [10, 20,200],
+      "periods": [10, 20, 50, 200],
       "talib_function": "EMA"
     },
     "vwap": {
@@ -84,7 +86,9 @@
   "validation": {
     "strict_mode": true,
     "fail_fast": true,
-    "require_all_config_parameters": true
+    "require_all_config_parameters": true,
+    "production_mode": true,
+    "enable_performance_validation": false
   },
   "risk_management": {
     "max_daily_entries": 3,

@@ -176,9 +176,16 @@ class SmartIndicatorEngine:
         # Calculate all enabled indicators from config.json (simplified approach)
         calculated_indicators = {}
         
-        # Process only enabled indicators from config
+        # Define all market data keys (not calculable indicators)
+        MARKET_DATA_KEYS = {
+            'open', 'high', 'low', 'close', 'volume',  # Base 5m market data
+            'ltp_open', 'ltp_high', 'ltp_low', 'ltp_close', 'ltp_volume',  # LTP market data (was 1m_*)
+            'Indicator_Timestamp'  # Debugging column
+        }
+        
+        # Process only enabled indicators from config (exclude market data keys)
         enabled_indicator_keys = [key for key in self.enabled_indicators.keys() 
-                                 if key not in ['close', 'open', 'high', 'low', 'volume']]
+                                 if key not in MARKET_DATA_KEYS]
         
         print(f"🔧 Calculating {len(enabled_indicator_keys)} enabled indicators...")
         

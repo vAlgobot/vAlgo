@@ -109,19 +109,14 @@ class IndicatorKeyManager:
                 },
                 "market_data_keys": {
                     key: desc for key, desc in indicator_keys.items() 
-                    if key in ['close', 'open', 'high', 'low', 'volume']
+                    if key in ['close', 'open', 'high', 'low', 'volume', '1m_open', '1m_high', '1m_low', '1m_close', '1m_volume', 'Indicator_Timestamp']
                 },
                 "calculated_indicators": {
                     key: desc for key, desc in indicator_keys.items() 
-                    if key not in ['close', 'open', 'high', 'low', 'volume']
+                    if key not in ['close', 'open', 'high', 'low', 'volume', '1m_open', '1m_high', '1m_low', '1m_close', '1m_volume', 'Indicator_Timestamp']
                 },
                 "all_available_keys": indicator_keys,
-                "usage_examples": {
-                    "simple_condition": "close > ma_20",
-                    "complex_condition": "(close > ma_9) & (ma_9 > ma_20) & (rsi_14 < 70)",
-                    "trend_following": "(ma_9 > ma_20) & (ma_20 > ma_50) & (ma_50 > ma_200)",
-                    "reversal_strategy": "(rsi_14 < 30) & (close > ma_20)"
-                },
+                "usage_examples": self._generate_usage_examples(indicator_keys),
                 "configuration_source": {
                     "enabled_indicators": self._get_enabled_indicator_summary(),
                     "how_to_add_indicators": "Enable indicators in config.json with 'enabled': true",
@@ -356,6 +351,37 @@ class IndicatorKeyManager:
         except Exception as e:
             # Silent error handling to avoid encoding issues
             return set()
+    
+    def _generate_usage_examples(self, indicator_keys: Dict[str, str]) -> Dict[str, str]:
+        """
+        Generate usage examples dynamically based on available keys.
+        
+        Args:
+            indicator_keys: Dictionary of available indicator keys
+            
+        Returns:
+            Dictionary of usage examples
+        """
+        # Base examples (always available)
+        examples = {
+            "simple_condition": "close > ma_20",
+            "complex_condition": "(close > ma_9) & (ma_9 > ma_20) & (rsi_14 < 70)",
+            "trend_following": "(ma_9 > ma_20) & (ma_20 > ma_50) & (ma_50 > ma_200)",
+            "reversal_strategy": "(rsi_14 < 30) & (close > ma_20)"
+        }
+        
+        # Add 1m examples if LTP keys are available
+        has_1m_keys = any(key.startswith('1m_') for key in indicator_keys.keys())
+        if has_1m_keys:
+            examples.update({
+                "breakout_strategy": "(1m_high > cpr_r1) & (close > sma_20)",
+                "breakdown_strategy": "(1m_low < cpr_s1) & (close < sma_20)",
+                "precision_entry": "(1m_close > 1m_open) & (rsi_14 < 70)",
+                "volume_confirmation": "(1m_volume > 1000) & (1m_high > previous_candle_high)",
+                "multi_timeframe_trend": "(1m_close > 1m_open) & (close > ema_20) & (cpr_type == 'extreme_narrow')"
+            })
+        
+        return examples
     
     def validate_strategies_against_indicators(self, force_validation: bool = False) -> Dict[str, Any]:
         """

@@ -1,26 +1,34 @@
 {
   "metadata": {
-    "generated_at": "2025-08-11T11:55:52.279040",
+    "generated_at": "2025-08-15T10:29:27.652637",
     "version": "1.0",
     "approach": "config_based_simple",
-    "total_keys": 34,
+    "total_keys": 42,
     "source": "config.json enabled indicators"
   },
   "market_data_keys": {
-    "close": "Closing price series",
-    "open": "Opening price series",
-    "high": "High price series",
-    "low": "Low price series",
-    "volume": "Volume series"
+    "close": "Closing price series (5m)",
+    "open": "Opening price series (5m)",
+    "high": "High price series (5m)",
+    "low": "Low price series (5m)",
+    "volume": "Volume series (5m)",
+    "Indicator_Timestamp": "Timestamp of 5m candle providing indicators (debugging)"
   },
   "calculated_indicators": {
+    "ltp_open": "1-minute opening price for execution timing",
+    "ltp_high": "1-minute high price for breakout detection",
+    "ltp_low": "1-minute low price for breakdown detection",
+    "ltp_close": "1-minute closing price for execution confirmation",
+    "ltp_volume": "1-minute volume for execution validation",
     "rsi_10": "RSI with 10 period",
     "rsi_20": "RSI with 20 period",
     "sma_10": "SMA with 10 period",
+    "sma_20": "SMA with 20 period",
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
     "ema_10": "EMA with 10 period",
     "ema_20": "EMA with 20 period",
+    "ema_50": "EMA with 50 period",
     "ema_200": "EMA with 200 period",
     "cpr_pivot": "CPR PIVOT",
     "cpr_tc": "CPR TC",
@@ -45,18 +53,26 @@
     "previous_candle_close": "Previous candle CLOSE"
   },
   "all_available_keys": {
-    "close": "Closing price series",
-    "open": "Opening price series",
-    "high": "High price series",
-    "low": "Low price series",
-    "volume": "Volume series",
+    "close": "Closing price series (5m)",
+    "open": "Opening price series (5m)",
+    "high": "High price series (5m)",
+    "low": "Low price series (5m)",
+    "volume": "Volume series (5m)",
+    "ltp_open": "1-minute opening price for execution timing",
+    "ltp_high": "1-minute high price for breakout detection",
+    "ltp_low": "1-minute low price for breakdown detection",
+    "ltp_close": "1-minute closing price for execution confirmation",
+    "ltp_volume": "1-minute volume for execution validation",
+    "Indicator_Timestamp": "Timestamp of 5m candle providing indicators (debugging)",
     "rsi_10": "RSI with 10 period",
     "rsi_20": "RSI with 20 period",
     "sma_10": "SMA with 10 period",
+    "sma_20": "SMA with 20 period",
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
     "ema_10": "EMA with 10 period",
     "ema_20": "EMA with 20 period",
+    "ema_50": "EMA with 50 period",
     "ema_200": "EMA with 200 period",
     "cpr_pivot": "CPR PIVOT",
     "cpr_tc": "CPR TC",
@@ -107,6 +123,7 @@
         "enabled": true,
         "periods": [
           10,
+          20,
           50,
           200
         ],
@@ -114,6 +131,7 @@
         "config": {
           "periods": [
             10,
+            20,
             50,
             200
           ],
@@ -125,6 +143,7 @@
         "periods": [
           10,
           20,
+          50,
           200
         ],
         "talib_function": "EMA",
@@ -132,6 +151,7 @@
           "periods": [
             10,
             20,
+            50,
             200
           ],
           "talib_function": "EMA"
