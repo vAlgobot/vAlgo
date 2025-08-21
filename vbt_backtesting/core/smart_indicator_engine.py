@@ -200,6 +200,11 @@ class SmartIndicatorEngine:
                 indicator_duration = (indicator_end_time - indicator_start_time).total_seconds()
                 self.indicator_timings[indicator_name] = indicator_duration
                 
+                # Skip storing if indicator calculation was skipped (e.g., signal_candle indicators)
+                if indicator_values is None:
+                    print(f"   ⏭️ {indicator_name}: skipped (handled elsewhere) ({indicator_duration:.3f}s)")
+                    continue
+                
                 calculated_indicators[indicator_name] = indicator_values
                 
                 # Validation logging with data type handling
@@ -414,11 +419,14 @@ class SmartIndicatorEngine:
         
         data = self._current_ohlcv_data
         
-        # Check cache first for ultra-fast performance
-        data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
-        if data_hash in self._cpr_cache:
+        # Check cache first with optimized cache key (date range only)
+        start_date = data.index[0].date() if len(data.index) > 0 else None
+        end_date = data.index[-1].date() if len(data.index) > 0 else None
+        cache_key = f"cpr_{start_date}_{end_date}_{len(data)}"
+        
+        if cache_key in self._cpr_cache:
             print("⚡ Using cached CPR results (ultra-fast)")
-            return self._cpr_cache[data_hash]
+            return self._cpr_cache[cache_key]
         
         # Extract dates for daily grouping
         if hasattr(data.index, 'date'):
@@ -444,8 +452,8 @@ class SmartIndicatorEngine:
         # Broadcast daily CPR values back to intraday timeframe
         cpr_intraday = self._broadcast_daily_cpr_to_intraday_optimized(cpr_results, dates_array, len(data))
         
-        # Cache results for performance
-        self._cpr_cache[data_hash] = cpr_intraday
+        # Cache results for performance with optimized key
+        self._cpr_cache[cache_key] = cpr_intraday
         
         print(f"✅ Ultra-Fast CPR Calculation: Completed with {len(cpr_results) - 1} CPR indicators")
         
@@ -466,7 +474,7 @@ class SmartIndicatorEngine:
         
         try:
             # Get database path from config
-            db_path = self.main_config.get('database', {}).get('path', 'data/vAlgo_market_data.db')
+            db_path = self.main_config.get('database', {}).get('path', '../data/valgo_market_data.db')
             symbol = self.main_config.get('trading', {}).get('symbol', 'NIFTY')
             
             # FAIL-FAST: Database path must exist
@@ -820,6 +828,162 @@ class SmartIndicatorEngine:
         }
     
     # =============================================================================
+    # SignalCandle Implementation
+    # =============================================================================
+    
+    def _calculate_signal_candle(self, close: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Calculate signal candle OHLC data that persists during position lifecycle.
+        
+        Signal candle captures OHLC values when entry condition becomes True
+        and maintains those exact values until exit condition becomes True.
+        After exit, the next entry captures a new signal candle.
+        
+        Args:
+            close: Close price array (not used directly, but required for interface compatibility)
+            
+        Returns:
+            Dictionary with signal candle OHLC data as NumPy arrays
+            
+        Raises:
+            ConfigurationError: If calculation fails
+        """
+        print("📊 Signal Candle Calculation: Starting OHLC capture logic...")
+        
+        # FAIL-FAST: Ensure OHLCV data is available
+        if not hasattr(self, '_current_ohlcv_data') or self._current_ohlcv_data is None:
+            raise ConfigurationError("OHLCV data not available for signal candle calculation")
+        
+        data = self._current_ohlcv_data
+        
+        # Extract OHLC data
+        open_data = data['open'].values
+        high_data = data['high'].values
+        low_data = data['low'].values
+        close_data = data['close'].values
+        
+        # Initialize signal candle arrays with NaN
+        signal_open = np.full(len(data), np.nan)
+        signal_high = np.full(len(data), np.nan)
+        signal_low = np.full(len(data), np.nan)
+        signal_close = np.full(len(data), np.nan)
+        
+        print(f"   📊 Initialized signal candle arrays for {len(data)} candles")
+        print(f"   ⚠️  Signal candle values will be captured when entry conditions are met")
+        print(f"   🔄 Values will persist until position exits, then reset for next entry")
+        
+        # Note: Actual signal capture logic will be implemented when entry/exit signals are available
+        # This is a placeholder that will be populated by the signal generation pipeline
+        
+        return {
+            'signal_candle_open': signal_open,
+            'signal_candle_high': signal_high,
+            'signal_candle_low': signal_low,
+            'signal_candle_close': signal_close
+        }
+    
+    def update_signal_candle_with_signals(self, market_data: pd.DataFrame, 
+                                        entry_signals: np.ndarray, 
+                                        exit_signals: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Update signal candle values with actual entry/exit signals.
+        
+        This method implements the core signal candle logic:
+        1. When entry signal is True, capture current candle OHLC
+        2. Maintain those values until exit signal becomes True
+        3. Reset for next entry
+        
+        Args:
+            market_data: OHLCV DataFrame
+            entry_signals: Boolean array of entry signals  
+            exit_signals: Boolean array of exit signals
+            
+        Returns:
+            Dictionary with updated signal candle OHLC data
+            
+        Raises:
+            ConfigurationError: If calculation fails
+        """
+        try:
+            # Validate inputs
+            n = len(market_data)
+            if len(entry_signals) != n or len(exit_signals) != n:
+                raise ConfigurationError("Signal arrays length mismatch with market data")
+            
+            # Extract OHLC data
+            open_data = market_data['open'].values
+            high_data = market_data['high'].values
+            low_data = market_data['low'].values
+            close_data = market_data['close'].values
+            
+            # Initialize signal candle arrays with NaN
+            signal_open = np.full(n, np.nan)
+            signal_high = np.full(n, np.nan)
+            signal_low = np.full(n, np.nan)
+            signal_close = np.full(n, np.nan)
+            
+            # Position state tracking
+            in_position = False
+            current_signal_open = np.nan
+            current_signal_high = np.nan
+            current_signal_low = np.nan
+            current_signal_close = np.nan
+            
+            # Process each candle sequentially to maintain state
+            for i in range(n):
+                if entry_signals[i] and not in_position:
+                    # Entry signal - capture current candle OHLC
+                    in_position = True
+                    current_signal_open = open_data[i]
+                    current_signal_high = high_data[i]
+                    current_signal_low = low_data[i]
+                    current_signal_close = close_data[i]
+                    
+                    # Set signal candle values for this position
+                    signal_open[i] = current_signal_open
+                    signal_high[i] = current_signal_high
+                    signal_low[i] = current_signal_low
+                    signal_close[i] = current_signal_close
+                    
+                elif in_position and not exit_signals[i]:
+                    # In position - maintain signal candle values
+                    signal_open[i] = current_signal_open
+                    signal_high[i] = current_signal_high
+                    signal_low[i] = current_signal_low
+                    signal_close[i] = current_signal_close
+                    
+                elif exit_signals[i] and in_position:
+                    # Exit signal - maintain values for this final candle then reset
+                    signal_open[i] = current_signal_open
+                    signal_high[i] = current_signal_high
+                    signal_low[i] = current_signal_low
+                    signal_close[i] = current_signal_close
+                    
+                    # Reset position state
+                    in_position = False
+                    current_signal_open = np.nan
+                    current_signal_high = np.nan
+                    current_signal_low = np.nan
+                    current_signal_close = np.nan
+                
+                # If not in position and no entry signal, signal candle remains NaN
+            
+            # Count valid signal candle periods
+            valid_count = np.sum(~np.isnan(signal_open))
+            
+            print(f"   ✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            
+            return {
+                'signal_candle_open': signal_open,
+                'signal_candle_high': signal_high,
+                'signal_candle_low': signal_low,
+                'signal_candle_close': signal_close
+            }
+            
+        except Exception as e:
+            raise ConfigurationError(f"Signal candle calculation failed: {e}")
+    
+    # =============================================================================
     # Internal Helper Methods
     # =============================================================================
     
@@ -870,7 +1034,8 @@ class SmartIndicatorEngine:
             'sma': self._talib_sma_apply_func,
             'ema': self._talib_ema_apply_func,
             'cpr': self._calculate_cpr_numpy_batch,
-            'previous_candle_ohlc': self._calculate_previous_candle_ohlc
+            'previous_candle_ohlc': self._calculate_previous_candle_ohlc,
+            'signal_candle': self._calculate_signal_candle
         }
         
         return indicator_mappings
@@ -883,20 +1048,22 @@ class SmartIndicatorEngine:
             # Store current data for CPR calculation
             self._current_ohlcv_data = data
             
-            # Check if we've already calculated CPR for this data
-            data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
+            # Check if we've already calculated CPR for this data (optimized cache key)
+            start_date = data.index[0].date() if len(data.index) > 0 else None
+            end_date = data.index[-1].date() if len(data.index) > 0 else None
+            cache_key = f"cpr_{start_date}_{end_date}_{len(data)}"
             
-            if data_hash not in self._cpr_cache:
+            if cache_key not in self._cpr_cache:
                 # Calculate all CPR indicators at once
                 cpr_calc_function = self.indicator_functions.get('cpr')
                 if cpr_calc_function is None:
                     raise ConfigurationError("CPR calculation function not found")
                 
                 print(f"🚀 Ultra-Fast CPR Calculation: Starting for {indicator_name}...")
-                self._cpr_cache[data_hash] = cpr_calc_function(data['close'].values)
+                self._cpr_cache[cache_key] = cpr_calc_function(data['close'].values)
             
             # Return the specific CPR sub-indicator requested
-            cpr_results = self._cpr_cache[data_hash]
+            cpr_results = self._cpr_cache[cache_key]
             if indicator_name in cpr_results:
                 return pd.Series(cpr_results[indicator_name], index=data.index, name=indicator_name)
             else:
@@ -908,20 +1075,22 @@ class SmartIndicatorEngine:
             # Store current data for CPR calculation
             self._current_ohlcv_data = data
             
-            # Check if we've already calculated CPR for this data
-            data_hash = hash(tuple(data.index) + tuple(data['close'].values[:10]))
+            # Check if we've already calculated CPR for this data (optimized cache key)
+            start_date = data.index[0].date() if len(data.index) > 0 else None
+            end_date = data.index[-1].date() if len(data.index) > 0 else None
+            cache_key = f"cpr_{start_date}_{end_date}_{len(data)}"
             
-            if data_hash not in self._cpr_cache:
+            if cache_key not in self._cpr_cache:
                 # Calculate all CPR indicators at once
                 cpr_calc_function = self.indicator_functions.get('cpr')
                 if cpr_calc_function is None:
                     raise ConfigurationError("CPR calculation function not found")
                 
                 print(f"🚀 Ultra-Fast CPR Calculation: Starting for {indicator_name}...")
-                self._cpr_cache[data_hash] = cpr_calc_function(data['close'].values)
+                self._cpr_cache[cache_key] = cpr_calc_function(data['close'].values)
             
             # Return the specific previous day sub-indicator requested
-            cpr_results = self._cpr_cache[data_hash]
+            cpr_results = self._cpr_cache[cache_key]
             if indicator_name in cpr_results:
                 return pd.Series(cpr_results[indicator_name], index=data.index, name=indicator_name)
             else:
@@ -953,6 +1122,12 @@ class SmartIndicatorEngine:
             else:
                 available_keys = list(prev_results.keys())
                 raise ConfigurationError(f"Previous candle sub-indicator '{indicator_name}' not found. Available: {available_keys}")
+        
+        # SKIP SIGNAL CANDLE INDICATORS - handled exclusively by VectorBT Signal Generator
+        if indicator_name.startswith('signal_candle_'):
+            # Skip calculation entirely - signal candle data provided by VectorBT Signal Generator
+            # Don't create any columns to avoid duplicates in results compilation
+            return None  # Signal to caller that this indicator is handled elsewhere
         
         # Parse indicator name for standard indicators (e.g., "rsi_14" -> type="rsi", period=14)
         if '_' in indicator_name:

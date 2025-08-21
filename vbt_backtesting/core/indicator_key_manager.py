@@ -342,8 +342,8 @@ class IndicatorKeyManager:
             # Pattern to match indicator references:
             # - Standard format: rsi_14, sma_20, ema_9, etc.
             # - Market data: close, open, high, low, volume
-            # - Special indicators: previous_day_high, cpr_pivot, etc.
-            pattern = r'\b(?:rsi_\d+|sma_\d+|ema_\d+|ma_\d+|vwap|close|open|high|low|volume|previous_day_\w+|previous_candle_\w+|cpr_\w+)\b'
+            # - Special indicators: previous_day_high, cpr_pivot, signal_candle_open, etc.
+            pattern = r'\b(?:rsi_\d+|sma_\d+|ema_\d+|ma_\d+|vwap|close|open|high|low|volume|previous_day_\w+|previous_candle_\w+|cpr_\w+|signal_candle_\w+)\b'
             
             matches = re.findall(pattern, expression, re.IGNORECASE)
             return set(matches)
@@ -379,6 +379,16 @@ class IndicatorKeyManager:
                 "precision_entry": "(1m_close > 1m_open) & (rsi_14 < 70)",
                 "volume_confirmation": "(1m_volume > 1000) & (1m_high > previous_candle_high)",
                 "multi_timeframe_trend": "(1m_close > 1m_open) & (close > ema_20) & (cpr_type == 'extreme_narrow')"
+            })
+        
+        # Add signal_candle examples if signal_candle keys are available
+        has_signal_candle_keys = any(key.startswith('signal_candle_') for key in indicator_keys.keys())
+        if has_signal_candle_keys:
+            examples.update({
+                "signal_candle_stop_loss": "(close < signal_candle_low)",
+                "signal_candle_take_profit": "(close > signal_candle_high * 1.02)",
+                "signal_candle_breakout_exit": "(close < signal_candle_close * 0.98)",
+                "signal_candle_range_exit": "(close < signal_candle_low) | (close > signal_candle_high)"
             })
         
         return examples

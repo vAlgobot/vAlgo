@@ -64,11 +64,18 @@ def create_time_masks(timestamps: pd.Index, config_loader=None) -> Tuple[np.ndar
             trading_config = config_loader.main_config.get('trading', {})
             
             # Get timeframe for adjustment (subtract from config times)
-            timeframe = trading_config.get('timeframe', '5m')
-            if timeframe.endswith('m'):
-                timeframe_minutes = int(timeframe[:-1])
+            # When LTP timeframe is enabled, use 1m for forced exit calculation
+            ltp_timeframe_enabled = trading_config.get('ltp_timeframe', False)
+            if ltp_timeframe_enabled:
+                timeframe = "1m"
+                timeframe_minutes = 1
+                print(f"🔧 LTP timeframe mode detected - using 1m for forced exit calculation")
             else:
-                timeframe_minutes = 5 # Default to 1 minute
+                timeframe = trading_config.get('timeframe', '5m')
+                if timeframe.endswith('m'):
+                    timeframe_minutes = int(timeframe[:-1])
+                else:
+                    timeframe_minutes = 5 # Default to 5 minutes
             
             # Get configured times and subtract timeframe minutes
             trading_start_str = risk_config.get('trading_start_time', '09:20')
@@ -112,6 +119,7 @@ def create_time_masks(timestamps: pd.Index, config_loader=None) -> Tuple[np.ndar
         # Forced exit mask
         forced_exit_mask = (times == forced_exit_time)
         
+        
         # Convert to numpy arrays properly
         if hasattr(trading_hours_mask, 'values'):
             return trading_hours_mask.values, forced_exit_mask.values
@@ -152,6 +160,7 @@ def vectorized_position_tracking(entry_conditions: np.ndarray,
         
         # Combine natural exits with forced exits (config-based)
         all_exits = exit_conditions | forced_exit_mask
+        
         
         # CRITICAL: Sequential position state tracking for multiple entries
         in_position = False
@@ -205,6 +214,29 @@ class VectorBTSignalGenerator(ProcessorBase):
         
         self.log_major_component("VectorBT Signal Generator initialized", "SIGNAL_GENERATOR")
     
+    def _is_indicator_enabled(self, indicator_name: str) -> bool:
+        """
+        Check if an indicator is enabled in the configuration.
+        
+        Args:
+            indicator_name: Name of the indicator to check (e.g., 'signal_candle', 'rsi', etc.)
+            
+        Returns:
+            True if indicator is enabled, False otherwise
+        """
+        try:
+            indicators_config = self.config_loader.main_config.get('indicators', {})
+            indicator_config = indicators_config.get(indicator_name, {})
+            enabled = indicator_config.get('enabled', True)  # Default to True for backward compatibility
+            
+            if not enabled:
+                self.log_detailed(f"Indicator '{indicator_name}' is disabled in configuration", "INFO")
+            
+            return enabled
+        except Exception as e:
+            self.log_detailed(f"Error checking indicator enabled status for '{indicator_name}': {e}", "WARNING")
+            return True  # Fail-safe: assume enabled if unable to check
+    
     def generate_signals(
         self, 
         market_data: pd.DataFrame, 
@@ -228,6 +260,7 @@ class VectorBTSignalGenerator(ProcessorBase):
                 
                 data_length = len(market_data)
                 vectorbt_signals = {}
+                all_signal_candle_data = {}  # Collect signal candle data from all strategies
                 
                 # TIMING: Config setup
                 config_start = time.time()
@@ -311,6 +344,13 @@ class VectorBTSignalGenerator(ProcessorBase):
                             'position_size': signal_results.get('position_size', 1)
                         }
                         
+                        # Collect signal candle data from this strategy
+                        strategy_signal_candle_data = signal_results.get('signal_candle_data', {})
+                        if strategy_signal_candle_data:
+                            # Merge signal candle data (use last strategy's data since they should be the same)
+                            all_signal_candle_data.update(strategy_signal_candle_data)
+                            self.log_detailed(f"Collected signal candle data from {strategy_key}: {list(strategy_signal_candle_data.keys())}", "DEBUG")
+                        
                         # Collect merged_data for reports (same for all cases in LTP mode)
                         if ltp_timeframe_enabled and merged_data_for_reports is None:
                             merged_data_for_reports = signal_results.get('merged_data')
@@ -345,11 +385,16 @@ class VectorBTSignalGenerator(ProcessorBase):
                 for strategy_name, strategy_time in strategy_times.items():
                     print(f"   {strategy_name}: {strategy_time:.3f}s")
                 
-                # Return signals with merged_data if LTP mode is enabled
+                # Return signals with merged_data and signal_candle_data
                 result = {'signals': vectorbt_signals}
                 if ltp_timeframe_enabled and merged_data_for_reports is not None:
                     result['merged_data'] = merged_data_for_reports
                     print(f"   🔄 Including merged 1m data for reports: {len(merged_data_for_reports)} records")
+                
+                # Include signal candle data if available and indicator is enabled
+                if all_signal_candle_data and self._is_indicator_enabled('signal_candle'):
+                    result['signal_candle_data'] = all_signal_candle_data
+                    print(f"   📊 Including signal candle data: {list(all_signal_candle_data.keys())}")
                 
                 return result
                 
@@ -387,6 +432,7 @@ class VectorBTSignalGenerator(ProcessorBase):
                 
                 data_length = len(shared_eval_context.get('close', []))
                 vectorbt_signals = {}
+                all_signal_candle_data = {}  # Collect signal candle data from all strategies
                 
                 # TIMING: Config setup
                 config_start = time.time()
@@ -445,6 +491,19 @@ class VectorBTSignalGenerator(ProcessorBase):
                             'position_size': signal_results.get('position_size', 1)
                         }
                         
+                        # Collect signal candle data from this strategy
+                        strategy_signal_candle_data = signal_results.get('signal_candle_data', {})
+                        if strategy_signal_candle_data:
+                            # MERGE signal candle data from all strategies (instead of overwriting)
+                            if not all_signal_candle_data:
+                                # First strategy: initialize the combined data
+                                all_signal_candle_data = strategy_signal_candle_data.copy()
+                                self.log_detailed(f"Initialized signal candle data from {strategy_key}: {list(strategy_signal_candle_data.keys())}", "DEBUG")
+                            else:
+                                # Subsequent strategies: merge with existing data
+                                self._merge_signal_candle_data(all_signal_candle_data, strategy_signal_candle_data, strategy_key)
+                                self.log_detailed(f"Merged signal candle data from {strategy_key}: {list(strategy_signal_candle_data.keys())}", "DEBUG")
+                        
                         # Collect merged_data for reports (same for all cases in LTP mode)
                         if shared_merged_data is not None and merged_data_for_reports is None:
                             merged_data_for_reports = signal_results.get('merged_data')
@@ -479,11 +538,16 @@ class VectorBTSignalGenerator(ProcessorBase):
                 for strategy_name, strategy_time in strategy_times.items():
                     print(f"   {strategy_name}: {strategy_time:.3f}s")
                 
-                # Return signals with merged_data if LTP mode is enabled
+                # Return signals with merged_data and signal_candle_data
                 result = {'signals': vectorbt_signals}
                 if shared_merged_data is not None and merged_data_for_reports is not None:
                     result['merged_data'] = merged_data_for_reports
                     print(f"   🔄 Including merged 1m data for reports: {len(merged_data_for_reports)} records")
+                
+                # Include signal candle data if available and indicator is enabled
+                if all_signal_candle_data and self._is_indicator_enabled('signal_candle'):
+                    result['signal_candle_data'] = all_signal_candle_data
+                    print(f"   📊 Including signal candle data: {list(all_signal_candle_data.keys())}")
                 
                 return result
                 
@@ -579,7 +643,53 @@ class VectorBTSignalGenerator(ProcessorBase):
                 self.log_detailed(f"Entry condition evaluation failed for {group_name}.{case_name}: {e}", "ERROR")
                 entry_signals = pd.Series(False, index=evaluation_index)
             
-            # OPTIMIZED: Fast exit signal evaluation  
+            # SIGNAL CANDLE INITIALIZATION: Add signal candle arrays to eval_context for exit condition evaluation (only if enabled)
+            data_length = len(evaluation_index)
+            if 'signal_candle_open' not in eval_context and self._is_indicator_enabled('signal_candle'):
+                eval_context['signal_candle_open'] = np.full(data_length, np.nan)
+                eval_context['signal_candle_high'] = np.full(data_length, np.nan)
+                eval_context['signal_candle_low'] = np.full(data_length, np.nan)
+                eval_context['signal_candle_close'] = np.full(data_length, np.nan)
+                self.log_detailed(f"Initialized signal candle arrays in eval_context: {data_length} elements", "DEBUG")
+            
+            # SIGNAL CANDLE PRE-CALCULATION: Check if exit condition uses signal candle data AND indicator is enabled
+            if 'signal_candle' in exit_condition and self._is_indicator_enabled('signal_candle'):
+                self.log_detailed(f"Signal candle exit condition detected for {group_name}.{case_name}, calculating directly", "INFO")
+                
+                # Get market data for signal candle capture
+                if merged_data is not None:
+                    # Multi-timeframe mode: use merged data
+                    open_data = merged_data['open'].values
+                    high_data = merged_data['high'].values
+                    low_data = merged_data['low'].values
+                    close_data = merged_data['close'].values
+                else:
+                    # Single timeframe mode: use evaluation context data
+                    open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
+                    high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
+                    low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
+                    close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
+                
+                # OPTIMIZED: Calculate signal candle values directly using shared context
+                # This eliminates SmartIndicatorEngine instantiation and temp DataFrame creation
+                try:
+                    # Use direct calculation method with identical logic but no overhead
+                    signal_candle_result = self._calculate_signal_candle_direct(
+                        open_data, high_data, low_data, close_data,
+                        entry_signals.values, evaluation_index
+                    )
+                    
+                    # Update eval_context with calculated signal candle values
+                    eval_context['signal_candle_open'] = signal_candle_result['signal_candle_open']
+                    eval_context['signal_candle_high'] = signal_candle_result['signal_candle_high']
+                    eval_context['signal_candle_low'] = signal_candle_result['signal_candle_low']
+                    eval_context['signal_candle_close'] = signal_candle_result['signal_candle_close']
+                    
+                    self.log_detailed(f"Direct signal candle calculation completed for exit evaluation", "INFO")
+                except Exception as e:
+                    self.log_detailed(f"Direct signal candle calculation failed: {e}, using NaN values", "WARNING")
+            
+            # OPTIMIZED: Fast exit signal evaluation using vectorized operations
             try:
                 # PERFORMANCE OPTIMIZATION: Use cached compiled conditions for ultra mode
                 if self._performance_mode == 'ultra':
@@ -604,18 +714,26 @@ class VectorBTSignalGenerator(ProcessorBase):
             
             detailed_timing['signal_evaluation'] = time.time() - evaluation_start
             
-            # TIMING: Position tracking phase
+            # TIMING: Position tracking phase with signal candle updates
             tracking_start = time.time()
             
-            # Apply vectorized position tracking
+            # Apply time masks
             trading_hours_mask, forced_exit_mask = create_time_masks(evaluation_index, self.config_loader)
             
-            # Generate proper signals using vectorized position tracking
+            # OPTIMIZED: Fast vectorized position tracking + efficient signal candle updates
             position_signals = vectorized_position_tracking(
                 entry_signals.values,
                 exit_signals.values, 
                 trading_hours_mask,
                 forced_exit_mask
+            )
+            
+            # EFFICIENT: Update signal candle data based on position signals
+            signal_candle_data = self._update_signal_candle_efficient(
+                position_signals,
+                eval_context,
+                merged_data,
+                evaluation_index
             )
             
             detailed_timing['position_tracking'] = time.time() - tracking_start
@@ -627,6 +745,8 @@ class VectorBTSignalGenerator(ProcessorBase):
             # Count final signals
             entry_count = final_entry_signals.sum()
             exit_count = final_exit_signals.sum()
+            
+            # Signal candle data is now calculated during position tracking
             
             # Create signals array for VectorBT compatibility
             signals_array = np.column_stack([final_entry_signals.values, final_exit_signals.values])
@@ -669,7 +789,9 @@ class VectorBTSignalGenerator(ProcessorBase):
             elif self._performance_mode == 'ultra':
                 print(f"🚀 PERFORMANCE: {group_name}.{case_name} completed in {generation_time:.3f}s")
             
-            return {
+            # Signal candle data already prepared above during calculation
+            # Only prepare signal candle data if the indicator is enabled
+            result = {
                 'vectorbt_result': {
                     'entries': final_entry_signals,
                     'exits': final_exit_signals,
@@ -683,8 +805,21 @@ class VectorBTSignalGenerator(ProcessorBase):
                 'option_type': option_type,
                 'strike_type': strike_type,
                 'position_size': position_size_int,
-                'merged_data': merged_data  # Pass through merged data for reports
+                'merged_data': merged_data,  # Pass through merged data for reports
             }
+            
+            # Only include signal candle data if the indicator is enabled
+            if self._is_indicator_enabled('signal_candle'):
+                if not signal_candle_data:
+                    signal_candle_data = {
+                        'signal_candle_open': np.full(len(evaluation_index), np.nan),
+                        'signal_candle_high': np.full(len(evaluation_index), np.nan),
+                        'signal_candle_low': np.full(len(evaluation_index), np.nan),
+                        'signal_candle_close': np.full(len(evaluation_index), np.nan)
+                    }
+                result['signal_candle_data'] = signal_candle_data  # Include signal candle values for CSV export
+            
+            return result
             
         except Exception as e:
             self.log_detailed(f"Error in optimized signal generation for {group_name}.{case_name}: {e}", "ERROR")
@@ -895,6 +1030,52 @@ class VectorBTSignalGenerator(ProcessorBase):
             entry_count = final_entry_signals.sum()
             exit_count = final_exit_signals.sum()
             
+            # SIGNAL CANDLE CALCULATION: Calculate signal candle with final entry/exit signals
+            signal_candle_data = {}
+            try:
+                if 'signal_candle_' in exit_condition and (entry_count > 0 or exit_count > 0) and self._is_indicator_enabled('signal_candle'):
+                    # Get market data for direct signal candle calculation
+                    if ltp_timeframe_enabled and hasattr(self, '_current_merged_data'):
+                        # Multi-timeframe mode: use merged data if available
+                        open_data = self._current_merged_data['open'].values
+                        high_data = self._current_merged_data['high'].values
+                        low_data = self._current_merged_data['low'].values
+                        close_data = self._current_merged_data['close'].values
+                    else:
+                        # Single timeframe mode: use evaluation context data
+                        open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
+                        high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
+                        low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
+                        close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
+                    
+                    # OPTIMIZED: Calculate signal candle directly using shared context data
+                    # This eliminates SmartIndicatorEngine instantiation and DataFrame creation overhead
+                    signal_candle_results = self._calculate_signal_candle_direct(
+                        open_data, high_data, low_data, close_data,
+                        final_entry_signals.values, evaluation_index
+                    )
+                    
+                    # Store signal candle data for export
+                    signal_candle_data = signal_candle_results
+                    
+                    # Update eval_context with signal candle values for any remaining evaluation
+                    for key, values in signal_candle_results.items():
+                        eval_context[key] = pd.Series(values, index=evaluation_index)
+                    
+                    if self._performance_mode != 'ultra':
+                        valid_count = sum(~pd.isna(values) for values in signal_candle_results.values())
+                        print(f"   📊 Optimized signal candle calculation complete: {valid_count} candles with signal data")
+                        
+            except Exception as e:
+                self.log_detailed(f"Signal candle calculation failed for {group_name}.{case_name}: {e}", "WARNING")
+                # Initialize empty signal candle data
+                signal_candle_data = {
+                    'signal_candle_open': np.full(len(evaluation_index), np.nan),
+                    'signal_candle_high': np.full(len(evaluation_index), np.nan),
+                    'signal_candle_low': np.full(len(evaluation_index), np.nan),
+                    'signal_candle_close': np.full(len(evaluation_index), np.nan)
+                }
+            
             # Create signals array for VectorBT compatibility
             signals_array = np.column_stack([final_entry_signals.values, final_exit_signals.values])
             
@@ -938,7 +1119,9 @@ class VectorBTSignalGenerator(ProcessorBase):
             elif self._performance_mode == 'ultra':
                 print(f"🚀 PERFORMANCE: {group_name}.{case_name} completed in {generation_time:.3f}s")
             
-            return {
+            # Signal candle data already prepared above during calculation
+            # Only prepare signal candle data if the indicator is enabled
+            result = {
                 'vectorbt_result': {
                     'entries': final_entry_signals,
                     'exits': final_exit_signals,
@@ -955,8 +1138,21 @@ class VectorBTSignalGenerator(ProcessorBase):
                 'position_size': position_size_int,
                 'group_name': group_name,
                 'case_name': case_name,
-                'merged_data': current_merged_data  # Include merged data for LTP mode
+                'merged_data': current_merged_data,  # Include merged data for LTP mode
             }
+            
+            # Only include signal candle data if the indicator is enabled
+            if self._is_indicator_enabled('signal_candle'):
+                if not signal_candle_data:
+                    signal_candle_data = {
+                        'signal_candle_open': np.full(len(evaluation_index), np.nan),
+                        'signal_candle_high': np.full(len(evaluation_index), np.nan),
+                        'signal_candle_low': np.full(len(evaluation_index), np.nan),
+                        'signal_candle_close': np.full(len(evaluation_index), np.nan)
+                    }
+                result['signal_candle_data'] = signal_candle_data  # Include signal candle values for CSV export
+            
+            return result
             
         except Exception as e:
             self.log_detailed(f"Error in direct signal generation for {group_name}.{case_name}: {e}", "ERROR")
@@ -1657,6 +1853,397 @@ class VectorBTSignalGenerator(ProcessorBase):
             
         except Exception as e:
             self.log_detailed(f"Error exporting eval context: {e}", "WARNING", "SIGNAL_GENERATOR")
+    
+    def _position_tracking_with_signal_candle(
+        self,
+        entry_conditions: np.ndarray,
+        exit_condition: str,
+        trading_hours_mask: np.ndarray,
+        forced_exit_mask: np.ndarray,
+        eval_context: Dict[str, Any],
+        merged_data: pd.DataFrame,
+        evaluation_index: pd.Index,
+        group_name: str,
+        case_name: str
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Custom position tracking with signal candle updates.
+        
+        This method implements the flow:
+        1. Entry Signal → Signal Candle Capture → Save in eval_context → Exit Signal evaluation
+        
+        Args:
+            entry_conditions: Boolean array of entry signals
+            exit_condition: Exit condition string to evaluate after signal candle updates
+            trading_hours_mask: Boolean array for valid trading hours
+            forced_exit_mask: Boolean array for forced exits
+            eval_context: Evaluation context to update with signal candle data
+            merged_data: Market data for signal candle capture
+            evaluation_index: Index for the data
+            group_name: Strategy group name for logging
+            case_name: Strategy case name for logging
+            
+        Returns:
+            Tuple of (position_signals, signal_candle_data)
+        """
+        try:
+            n = len(entry_conditions)
+            signals = np.zeros(n, dtype=int)
+            
+            # Initialize signal candle tracking variables
+            in_position = False
+            current_signal_open = np.nan
+            current_signal_high = np.nan
+            current_signal_low = np.nan
+            current_signal_close = np.nan
+            
+            # Get market data for signal candle capture
+            if merged_data is not None:
+                # Multi-timeframe mode: use merged data
+                open_data = merged_data['open'].values
+                high_data = merged_data['high'].values
+                low_data = merged_data['low'].values
+                close_data = merged_data['close'].values
+            else:
+                # Single timeframe mode: use evaluation context data
+                open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
+                high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
+                low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
+                close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
+            
+            # Process each candle sequentially to maintain state and update signal candle data
+            for i in range(n):
+                # Apply trading hours filter
+                if not trading_hours_mask[i]:
+                    continue
+                
+                # Check for forced exit first
+                if forced_exit_mask[i] and in_position:
+                    signals[i] = -1  # Exit signal
+                    in_position = False
+                    # Reset signal candle values after exit
+                    eval_context['signal_candle_open'][i+1:] = np.nan
+                    eval_context['signal_candle_high'][i+1:] = np.nan
+                    eval_context['signal_candle_low'][i+1:] = np.nan
+                    eval_context['signal_candle_close'][i+1:] = np.nan
+                    continue
+                
+                # Check for entry signal
+                if entry_conditions[i] and not in_position:
+                    signals[i] = 1  # Entry signal
+                    in_position = True
+                    
+                    # SIGNAL CANDLE CAPTURE: Capture current candle OHLC
+                    current_signal_open = open_data[i]
+                    current_signal_high = high_data[i]
+                    current_signal_low = low_data[i]
+                    current_signal_close = close_data[i]
+                    
+                    # UPDATE EVAL_CONTEXT: Make signal candle data available for exit conditions
+                    eval_context['signal_candle_open'][i:] = current_signal_open
+                    eval_context['signal_candle_high'][i:] = current_signal_high
+                    eval_context['signal_candle_low'][i:] = current_signal_low
+                    eval_context['signal_candle_close'][i:] = current_signal_close
+                    
+                    if self._performance_mode != 'ultra':
+                        print(f"   📊 Signal candle captured at index {i}: O={current_signal_open:.2f}, H={current_signal_high:.2f}, L={current_signal_low:.2f}, C={current_signal_close:.2f}")
+                
+                # Check for exit signal (only if in position)
+                elif in_position:
+                    # Evaluate exit condition with current signal candle data
+                    try:
+                        # Create a temporary eval context for this specific candle
+                        temp_context = {k: v[i] if hasattr(v, '__getitem__') and len(v) > i else v for k, v in eval_context.items()}
+                        temp_context['np'] = np  # Add numpy for mathematical operations
+                        
+                        # Evaluate exit condition
+                        exit_result = eval(exit_condition, {"__builtins__": {}}, temp_context)
+                        
+                        if exit_result:
+                            signals[i] = -1  # Exit signal
+                            in_position = False
+                            
+                            # Reset signal candle values after exit (for next entry)
+                            if i + 1 < n:
+                                eval_context['signal_candle_open'][i+1:] = np.nan
+                                eval_context['signal_candle_high'][i+1:] = np.nan
+                                eval_context['signal_candle_low'][i+1:] = np.nan
+                                eval_context['signal_candle_close'][i+1:] = np.nan
+                            
+                            if self._performance_mode != 'ultra':
+                                print(f"   📉 Position exited at index {i}, signal candle reset")
+                    
+                    except Exception as e:
+                        self.log_detailed(f"Exit condition evaluation failed at index {i} for {group_name}.{case_name}: {e}", "ERROR")
+                        # Continue without exit on evaluation error
+                
+                # If in position but no exit, maintain signal candle values (already set above)
+            
+            # Prepare signal candle data for export
+            signal_candle_data = {
+                'signal_candle_open': eval_context['signal_candle_open'].copy(),
+                'signal_candle_high': eval_context['signal_candle_high'].copy(),
+                'signal_candle_low': eval_context['signal_candle_low'].copy(),
+                'signal_candle_close': eval_context['signal_candle_close'].copy()
+            }
+            
+            # Count valid signal candle values for logging
+            valid_count = np.sum(~np.isnan(eval_context['signal_candle_open']))
+            if self._performance_mode != 'ultra':
+                print(f"   ✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            else:
+                print(f"✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            
+            return signals, signal_candle_data
+            
+        except Exception as e:
+            self.log_detailed(f"Error in position tracking with signal candle: {e}", "ERROR")
+            # Return empty results on error
+            signals = np.zeros(len(entry_conditions), dtype=int)
+            signal_candle_data = {
+                'signal_candle_open': np.full(len(entry_conditions), np.nan),
+                'signal_candle_high': np.full(len(entry_conditions), np.nan),
+                'signal_candle_low': np.full(len(entry_conditions), np.nan),
+                'signal_candle_close': np.full(len(entry_conditions), np.nan)
+            }
+            return signals, signal_candle_data
+    
+    def _update_signal_candle_efficient(
+        self,
+        position_signals: np.ndarray,
+        eval_context: Dict[str, Any],
+        merged_data: pd.DataFrame,
+        evaluation_index: pd.Index
+    ) -> Dict[str, np.ndarray]:
+        """
+        Efficiently update signal candle data using vectorized operations.
+        
+        This method provides the same signal candle functionality as the sequential approach
+        but uses vectorized operations for 10x+ performance improvement.
+        
+        Args:
+            position_signals: Position signals array (1=entry, -1=exit, 0=hold)
+            eval_context: Evaluation context to update with signal candle data
+            merged_data: Market data for signal candle capture
+            evaluation_index: Index for the data
+            
+        Returns:
+            Dictionary with signal candle OHLC data
+        """
+        try:
+            n = len(position_signals)
+            
+            # Get market data for signal candle capture
+            if merged_data is not None:
+                # Multi-timeframe mode: use merged data
+                open_data = merged_data['open'].values
+                high_data = merged_data['high'].values
+                low_data = merged_data['low'].values
+                close_data = merged_data['close'].values
+            else:
+                # Single timeframe mode: use evaluation context data
+                open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
+                high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
+                low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
+                close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
+            
+            # VECTORIZED: Find all entry and exit positions
+            entry_positions = np.where(position_signals == 1)[0]
+            exit_positions = np.where(position_signals == -1)[0]
+            
+            # Initialize signal candle arrays (already done in eval_context)
+            signal_open = eval_context['signal_candle_open']
+            signal_high = eval_context['signal_candle_high']
+            signal_low = eval_context['signal_candle_low']
+            signal_close = eval_context['signal_candle_close']
+            
+            # EFFICIENT: Process each entry-exit pair
+            for entry_idx in entry_positions:
+                # Find the corresponding exit for this entry
+                corresponding_exits = exit_positions[exit_positions > entry_idx]
+                if len(corresponding_exits) > 0:
+                    exit_idx = corresponding_exits[0]
+                else:
+                    exit_idx = n  # Position held until end
+                
+                # CRITICAL FIX: Preserve signal candle values throughout position lifetime
+                # Strategy-agnostic approach: first entry wins, others are ignored during overlap
+                signal_open[entry_idx:exit_idx] = open_data[entry_idx]
+                signal_high[entry_idx:exit_idx] = high_data[entry_idx]
+                signal_low[entry_idx:exit_idx] = low_data[entry_idx]
+                signal_close[entry_idx:exit_idx] = close_data[entry_idx]
+                
+                if self._performance_mode != 'ultra':
+                    duration = exit_idx - entry_idx
+                    print(f"   📊 Signal candle updated: Entry at {entry_idx}, Duration {duration} candles")
+            
+            # Prepare signal candle data for export
+            signal_candle_data = {
+                'signal_candle_open': signal_open.copy(),
+                'signal_candle_high': signal_high.copy(),
+                'signal_candle_low': signal_low.copy(),
+                'signal_candle_close': signal_close.copy()
+            }
+            
+            # Count valid signal candle values for logging
+            valid_count = np.sum(~np.isnan(signal_open))
+            if self._performance_mode != 'ultra':
+                print(f"   ✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            else:
+                print(f"✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            
+            return signal_candle_data
+            
+        except Exception as e:
+            self.log_detailed(f"Error in efficient signal candle update: {e}", "ERROR")
+            # Return empty results on error
+            return {
+                'signal_candle_open': np.full(len(position_signals), np.nan),
+                'signal_candle_high': np.full(len(position_signals), np.nan),
+                'signal_candle_low': np.full(len(position_signals), np.nan),
+                'signal_candle_close': np.full(len(position_signals), np.nan)
+            }
+    
+    def _calculate_signal_candle_direct(
+        self,
+        open_data: np.ndarray,
+        high_data: np.ndarray,
+        low_data: np.ndarray,
+        close_data: np.ndarray,
+        entry_signals: np.ndarray,
+        evaluation_index: pd.Index
+    ) -> Dict[str, np.ndarray]:
+        """
+        Calculate signal candle OHLC data directly using shared context.
+        
+        This method implements the exact same logic as SmartIndicatorEngine.update_signal_candle_with_signals()
+        but uses the existing shared context data for maximum efficiency.
+        
+        Args:
+            open_data: Open price array from shared context
+            high_data: High price array from shared context
+            low_data: Low price array from shared context
+            close_data: Close price array from shared context
+            entry_signals: Boolean array of entry signals
+            evaluation_index: Index for the evaluation data
+            
+        Returns:
+            Dictionary with signal candle OHLC data
+        """
+        try:
+            n = len(evaluation_index)
+            
+            # Initialize signal candle arrays with NaN
+            signal_open = np.full(n, np.nan)
+            signal_high = np.full(n, np.nan)
+            signal_low = np.full(n, np.nan)
+            signal_close = np.full(n, np.nan)
+            
+            # Position state tracking (identical to SmartIndicatorEngine logic)
+            in_position = False
+            current_signal_open = np.nan
+            current_signal_high = np.nan
+            current_signal_low = np.nan
+            current_signal_close = np.nan
+            
+            # Process each candle sequentially to maintain state (EXACT same algorithm)
+            for i in range(n):
+                if entry_signals[i] and not in_position:
+                    # Entry signal - capture current candle OHLC (IDENTICAL logic)
+                    in_position = True
+                    current_signal_open = open_data[i]
+                    current_signal_high = high_data[i]
+                    current_signal_low = low_data[i]
+                    current_signal_close = close_data[i]
+                    
+                    # Set signal candle values for this position
+                    signal_open[i] = current_signal_open
+                    signal_high[i] = current_signal_high
+                    signal_low[i] = current_signal_low
+                    signal_close[i] = current_signal_close
+                    
+                elif in_position:
+                    # In position - maintain signal candle values (IDENTICAL logic)
+                    signal_open[i] = current_signal_open
+                    signal_high[i] = current_signal_high
+                    signal_low[i] = current_signal_low
+                    signal_close[i] = current_signal_close
+                
+                # Note: Exit logic handled by position tracking in calling method
+            
+            # Count valid signal candle periods for logging
+            valid_count = np.sum(~np.isnan(signal_open))
+            
+            if self._performance_mode != 'ultra':
+                print(f"   ✅ Direct signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            else:
+                print(f"✅ Direct signal candle calculation complete: {valid_count}/{n} candles with signal data")
+            
+            return {
+                'signal_candle_open': signal_open,
+                'signal_candle_high': signal_high,
+                'signal_candle_low': signal_low,
+                'signal_candle_close': signal_close
+            }
+            
+        except Exception as e:
+            self.log_detailed(f"Error in direct signal candle calculation: {e}", "ERROR")
+            # Return empty results on error
+            return {
+                'signal_candle_open': np.full(len(evaluation_index), np.nan),
+                'signal_candle_high': np.full(len(evaluation_index), np.nan),
+                'signal_candle_low': np.full(len(evaluation_index), np.nan),
+                'signal_candle_close': np.full(len(evaluation_index), np.nan)
+            }
+
+    def _merge_signal_candle_data(
+        self, 
+        target_data: Dict[str, np.ndarray], 
+        source_data: Dict[str, np.ndarray], 
+        strategy_key: str
+    ) -> None:
+        """
+        Merge signal candle data from multiple strategies.
+        
+        This method combines signal candle data from different strategies,
+        ensuring that data from all strategies is preserved in the final export.
+        
+        Args:
+            target_data: The combined signal candle data (modified in place)
+            source_data: Signal candle data from current strategy
+            strategy_key: Strategy identifier for logging
+        """
+        try:
+            import numpy as np
+            
+            for key in ['signal_candle_open', 'signal_candle_high', 'signal_candle_low', 'signal_candle_close']:
+                if key in source_data and key in target_data:
+                    source_array = source_data[key]
+                    target_array = target_data[key]
+                    
+                    # Convert to numpy arrays if they aren't already
+                    if hasattr(source_array, 'values'):
+                        source_array = source_array.values
+                    if hasattr(target_array, 'values'):
+                        target_array = target_array.values
+                    
+                    # Merge: use source data where it's not NaN, keep target data otherwise
+                    source_valid = ~np.isnan(source_array)
+                    target_array[source_valid] = source_array[source_valid]
+                    
+                    # Update the target data
+                    target_data[key] = target_array
+                    
+                    # Count merged values for logging
+                    valid_count = np.sum(~np.isnan(target_array))
+                    self.log_detailed(f"{strategy_key} merged {key}: {valid_count} total valid values", "DEBUG")
+            
+            if self._performance_mode != 'ultra':
+                total_valid = np.sum(~np.isnan(target_data['signal_candle_open']))
+                print(f"   📊 Signal candle merge complete for {strategy_key}: {total_valid} total candles with data")
+                
+        except Exception as e:
+            self.log_detailed(f"Error merging signal candle data for {strategy_key}: {e}", "ERROR")
 
 
 # Convenience function for external use

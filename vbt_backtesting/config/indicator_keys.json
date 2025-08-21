@@ -1,9 +1,9 @@
 {
   "metadata": {
-    "generated_at": "2025-08-15T10:29:27.652637",
+    "generated_at": "2025-08-21T07:23:29.931612",
     "version": "1.0",
     "approach": "config_based_simple",
-    "total_keys": 42,
+    "total_keys": 46,
     "source": "config.json enabled indicators"
   },
   "market_data_keys": {
@@ -20,13 +20,13 @@
     "ltp_low": "1-minute low price for breakdown detection",
     "ltp_close": "1-minute closing price for execution confirmation",
     "ltp_volume": "1-minute volume for execution validation",
-    "rsi_10": "RSI with 10 period",
-    "rsi_20": "RSI with 20 period",
-    "sma_10": "SMA with 10 period",
+    "rsi_14": "RSI with 14 period",
+    "rsi_21": "RSI with 21 period",
+    "sma_9": "SMA with 9 period",
     "sma_20": "SMA with 20 period",
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
-    "ema_10": "EMA with 10 period",
+    "ema_9": "EMA with 9 period",
     "ema_20": "EMA with 20 period",
     "ema_50": "EMA with 50 period",
     "ema_200": "EMA with 200 period",
@@ -50,7 +50,11 @@
     "previous_candle_open": "Previous candle OPEN",
     "previous_candle_high": "Previous candle HIGH",
     "previous_candle_low": "Previous candle LOW",
-    "previous_candle_close": "Previous candle CLOSE"
+    "previous_candle_close": "Previous candle CLOSE",
+    "signal_candle_open": "Signal candle OPEN - captured at entry, persistent until exit",
+    "signal_candle_high": "Signal candle HIGH - captured at entry, persistent until exit",
+    "signal_candle_low": "Signal candle LOW - captured at entry, persistent until exit",
+    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit"
   },
   "all_available_keys": {
     "close": "Closing price series (5m)",
@@ -64,13 +68,13 @@
     "ltp_close": "1-minute closing price for execution confirmation",
     "ltp_volume": "1-minute volume for execution validation",
     "Indicator_Timestamp": "Timestamp of 5m candle providing indicators (debugging)",
-    "rsi_10": "RSI with 10 period",
-    "rsi_20": "RSI with 20 period",
-    "sma_10": "SMA with 10 period",
+    "rsi_14": "RSI with 14 period",
+    "rsi_21": "RSI with 21 period",
+    "sma_9": "SMA with 9 period",
     "sma_20": "SMA with 20 period",
     "sma_50": "SMA with 50 period",
     "sma_200": "SMA with 200 period",
-    "ema_10": "EMA with 10 period",
+    "ema_9": "EMA with 9 period",
     "ema_20": "EMA with 20 period",
     "ema_50": "EMA with 50 period",
     "ema_200": "EMA with 200 period",
@@ -94,27 +98,35 @@
     "previous_candle_open": "Previous candle OPEN",
     "previous_candle_high": "Previous candle HIGH",
     "previous_candle_low": "Previous candle LOW",
-    "previous_candle_close": "Previous candle CLOSE"
+    "previous_candle_close": "Previous candle CLOSE",
+    "signal_candle_open": "Signal candle OPEN - captured at entry, persistent until exit",
+    "signal_candle_high": "Signal candle HIGH - captured at entry, persistent until exit",
+    "signal_candle_low": "Signal candle LOW - captured at entry, persistent until exit",
+    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit"
   },
   "usage_examples": {
     "simple_condition": "close > ma_20",
     "complex_condition": "(close > ma_9) & (ma_9 > ma_20) & (rsi_14 < 70)",
     "trend_following": "(ma_9 > ma_20) & (ma_20 > ma_50) & (ma_50 > ma_200)",
-    "reversal_strategy": "(rsi_14 < 30) & (close > ma_20)"
+    "reversal_strategy": "(rsi_14 < 30) & (close > ma_20)",
+    "signal_candle_stop_loss": "(close < signal_candle_low)",
+    "signal_candle_take_profit": "(close > signal_candle_high * 1.02)",
+    "signal_candle_breakout_exit": "(close < signal_candle_close * 0.98)",
+    "signal_candle_range_exit": "(close < signal_candle_low) | (close > signal_candle_high)"
   },
   "configuration_source": {
     "enabled_indicators": {
       "rsi": {
         "enabled": true,
         "periods": [
-          10,
-          20
+          14,
+          21
         ],
         "talib_function": "RSI",
         "config": {
           "periods": [
-            10,
-            20
+            14,
+            21
           ],
           "talib_function": "RSI"
         }
@@ -122,7 +134,7 @@
       "sma": {
         "enabled": true,
         "periods": [
-          10,
+          9,
           20,
           50,
           200
@@ -130,7 +142,7 @@
         "talib_function": "SMA",
         "config": {
           "periods": [
-            10,
+            9,
             20,
             50,
             200
@@ -141,7 +153,7 @@
       "ema": {
         "enabled": true,
         "periods": [
-          10,
+          9,
           20,
           50,
           200
@@ -149,7 +161,7 @@
         "talib_function": "EMA",
         "config": {
           "periods": [
-            10,
+            9,
             20,
             50,
             200
@@ -174,6 +186,14 @@
         "talib_function": null,
         "config": {
           "description": "Previous candle OHLC data"
+        }
+      },
+      "signal_candle": {
+        "enabled": true,
+        "periods": [],
+        "talib_function": null,
+        "config": {
+          "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
         }
       }
     },

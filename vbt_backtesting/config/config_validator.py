@@ -187,17 +187,54 @@ class ConfigValidator:
         self._validate_expression(case_config['exit'], f"exit condition for case '{case_name}'")
     
     def _validate_expression(self, expression: str, context: str):
-        """Validate trading condition expressions"""
+        """Validate trading condition expressions with smart pattern matching"""
         if not isinstance(expression, str) or not expression.strip():
             raise ConfigurationError(f"Invalid {context}: expression cannot be empty")
         
-        # Check for dangerous functions/imports
-        dangerous_patterns = ['import', 'exec', 'eval', '__', 'open', 'file']
-        for pattern in dangerous_patterns:
-            if pattern in expression.lower():
-                raise ConfigurationError(
-                    f"Dangerous pattern '{pattern}' found in {context}: {expression}"
-                )
+        # Check for dangerous function calls using regex patterns
+        # Look for function calls like 'open(', 'exec(', etc. rather than just substrings
+        dangerous_function_patterns = [
+            r'\bimport\s+',          # import statements
+            r'\bexec\s*\(',          # exec() function calls
+            r'\beval\s*\(',          # eval() function calls
+            r'__\w+__',              # dunder methods
+            r'\bopen\s*\(',          # open() function calls
+            r'\bfile\s*\(',          # file() function calls
+        ]
+        
+        # Allowed trading indicators that contain potentially dangerous words
+        allowed_trading_patterns = [
+            r'\bprevious_candle_open\b',    # OHLC previous candle data
+            r'\bprevious_day_open\b',       # Previous day open price
+            r'\bltp_open\b',                # Live trading price open
+            r'\bopen\b(?!\s*\()',          # 'open' as variable/column name (not function call)
+        ]
+        
+        expression_lower = expression.lower()
+        
+        # First check if expression contains allowed trading patterns
+        for allowed_pattern in allowed_trading_patterns:
+            if re.search(allowed_pattern, expression_lower):
+                # If found allowed pattern, remove it temporarily for danger checking
+                temp_expression = re.sub(allowed_pattern, '', expression_lower)
+                # Continue with danger checking on cleaned expression
+                for danger_pattern in dangerous_function_patterns:
+                    if re.search(danger_pattern, temp_expression):
+                        raise ConfigurationError(
+                            f"Dangerous pattern '{danger_pattern}' found in {context}: {expression}"
+                        )
+                # If we reach here, the expression is safe - skip remaining danger checks
+                break
+        else:
+            # No allowed patterns found, check for dangerous patterns directly
+            for danger_pattern in dangerous_function_patterns:
+                if re.search(danger_pattern, expression_lower):
+                    # Extract the matched pattern for clearer error message
+                    match = re.search(danger_pattern, expression_lower)
+                    matched_text = match.group() if match else danger_pattern
+                    raise ConfigurationError(
+                        f"Dangerous pattern '{matched_text.strip()}' found in {context}: {expression}"
+                    )
         
         # Basic syntax validation (parentheses matching)
         if expression.count('(') != expression.count(')'):

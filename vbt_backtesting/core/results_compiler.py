@@ -59,7 +59,8 @@ class ResultsCompiler(ProcessorBase):
         market_data: pd.DataFrame,
         all_indicators: Dict[str, pd.Series],
         trade_signals: Dict[str, Any],
-        performance_results: Dict[str, Any]
+        performance_results: Dict[str, Any],
+        signal_candle_data: Dict[str, pd.Series] = None
     ) -> Dict[str, Any]:
         """
         Compile comprehensive results from all processing phases.
@@ -69,6 +70,7 @@ class ResultsCompiler(ProcessorBase):
             all_indicators: Calculated indicators dictionary
             trade_signals: Extracted trade signals and pairs
             performance_results: Options P&L calculation results
+            signal_candle_data: Signal candle data from signal generation
             
         Returns:
             Dictionary with comprehensive analysis results
@@ -80,8 +82,35 @@ class ResultsCompiler(ProcessorBase):
                 # Compile market data summary
                 market_summary = self._compile_market_data_summary(market_data)
                 
+                # Merge signal candle data with all indicators for CSV export
+                combined_indicators = all_indicators.copy()
+                
+                # Debug: Check signal candle data
+                original_signal_candles = {k: type(v) for k, v in combined_indicators.items() if 'signal_candle' in k}
+                if original_signal_candles:
+                    print(f"🔍 DEBUG: Original signal candle indicators: {original_signal_candles}")
+                
+                if signal_candle_data:
+                    print(f"🔍 DEBUG: Signal candle data to merge: {[(k, type(v), len(v) if hasattr(v, '__len__') else 'no len') for k, v in signal_candle_data.items()]}")
+                    
+                    # Debug: Check if arrays contain actual values
+                    import numpy as np
+                    for k, v in signal_candle_data.items():
+                        if hasattr(v, '__len__') and len(v) > 0:
+                            valid_count = np.sum(~np.isnan(v)) if isinstance(v, np.ndarray) else sum(pd.notna(v))
+                            print(f"🔍 DEBUG: {k} has {valid_count} valid (non-NaN) values out of {len(v)}")
+                    
+                    combined_indicators.update(signal_candle_data)
+                    self.log_detailed(f"Added {len(signal_candle_data)} signal candle indicators to results", "INFO")
+                    
+                    # Debug: Check after merge
+                    merged_signal_candles = {k: type(v) for k, v in combined_indicators.items() if 'signal_candle' in k}
+                    print(f"🔍 DEBUG: After merge signal candle indicators: {merged_signal_candles}")
+                else:
+                    print(f"🔍 DEBUG: No signal candle data to merge")
+                
                 # Compile indicators summary
-                indicators_summary = self._compile_indicators_summary(all_indicators)
+                indicators_summary = self._compile_indicators_summary(combined_indicators)
                 
                 # Compile signals summary
                 signals_summary = self._compile_signals_summary(trade_signals)
@@ -107,7 +136,7 @@ class ResultsCompiler(ProcessorBase):
                     'market_data': market_summary,
                     'raw_market_data': market_data,  # Add actual DataFrame for CSV export
                     'indicators': indicators_summary,
-                    'raw_indicators': all_indicators,  # Add actual indicators for CSV export
+                    'raw_indicators': combined_indicators,  # Add actual indicators for CSV export (including signal candle data)
                     'signals': signals_summary,
                     'performance': performance_summary,
                     'system_metrics': system_metrics,

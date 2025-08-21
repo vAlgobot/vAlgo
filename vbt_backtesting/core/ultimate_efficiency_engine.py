@@ -337,6 +337,7 @@ class UltimateEfficiencyEngine:
             
             # Add numpy for mathematical operations
             shared_eval_context['np'] = np
+            self.performance_stats['Multi-Timeframe Context merge time'] = time.time() - context_build_time
             
             # Phase 3: VectorBT Signal Generation (Modular) - using pre-built context
             signal_start = time.time()
@@ -344,30 +345,18 @@ class UltimateEfficiencyEngine:
                 filtered_market_data, filtered_indicators, shared_eval_context, shared_merged_data
             )
             self.performance_stats['signal_generation_time'] = time.time() - signal_start
-            self.performance_stats['context_build_time'] = context_build_time
             
-            # Extract signals and merged_data from the result
+            # Extract signals, merged_data, and signal_candle_data from the result
             if isinstance(signal_generation_result, dict) and 'signals' in signal_generation_result:
                 # New format with merged_data support
                 vectorbt_signals = signal_generation_result['signals']
                 merged_data_for_reports = signal_generation_result.get('merged_data')
+                signal_candle_data = signal_generation_result.get('signal_candle_data', {})
             else:
                 # Backward compatibility - old format (direct signals dictionary)
                 vectorbt_signals = signal_generation_result
                 merged_data_for_reports = None
-            
-            # Phase 3.5: Multi-Timeframe Validation (if LTP timeframe enabled)
-            # trading_config = self.main_config.get('trading', {})
-            # if trading_config.get('ltp_timeframe', False):
-            #     self.selective_logger.log_major_component("Running multi-timeframe validation", "VALIDATION")
-            #     validation_result = self.signal_generator.validate_multi_timeframe_implementation()
-                
-            #     if validation_result.get('validation_status') == 'PASSED':
-            #         self.selective_logger.log_major_component("Multi-timeframe validation: PASSED", "VALIDATION")
-            #     else:
-            #         self.selective_logger.log_major_component(f"Multi-timeframe validation: {validation_result.get('validation_status', 'UNKNOWN')}", "VALIDATION")
-            #         if validation_result.get('error'):
-            #             self.selective_logger.log_detailed(f"Validation error: {validation_result['error']}", "WARNING", "VALIDATION")
+                signal_candle_data = {}
             
             # Phase 4: Entry/Exit Signal Extraction (Modular) - using filtered data
             extraction_start = time.time()
@@ -379,8 +368,7 @@ class UltimateEfficiencyEngine:
             
             if ltp_timeframe_enabled:
                 effective_timeframe = "1m"  # Signals are generated on 1m timestamps
-                self.selective_logger.log_detailed("Using 1m timeframe for signal extraction (LTP mode)", "INFO", "TIMEFRAME")
-                
+                self.selective_logger.log_detailed("Using 1m timeframe for signal extraction (LTP mode)", "INFO", "TIMEFRAME")              
                 # Use merged_data for reporting if available, otherwise use filtered data
                 if merged_data_for_reports is not None:
                     reporting_market_data = merged_data_for_reports
@@ -445,7 +433,7 @@ class UltimateEfficiencyEngine:
             # Phase 6: Results Compilation (Modular) - using reporting data
             compile_start = time.time()
             results = self.results_compiler.compile_results(
-                reporting_market_data, reporting_indicators, trade_signals, options_pnl
+                reporting_market_data, reporting_indicators, trade_signals, options_pnl, signal_candle_data
             )
             self.performance_stats['results_compilation_time'] = time.time() - compile_start
             
@@ -500,11 +488,6 @@ class UltimateEfficiencyEngine:
                     if trade_comparison_results:
                         results['trade_comparison'] = trade_comparison_results
                         self.selective_logger.log_major_component("Trade comparison completed successfully", "TRADE_COMPARISON")
-                        # Log comparison results structure for debugging
-                        # self.selective_logger.log_detailed(f"Trade comparison keys: {list(trade_comparison_results.keys())}", "DEBUG")
-                        # comparison_results = trade_comparison_results.get('comparison_results', [])
-                        # self.selective_logger.log_detailed(f"Number of comparison results: {len(comparison_results) if comparison_results else 0}", "DEBUG")
-                        # self.selective_logger.log_detailed(f"✅ CRITICAL: Trade comparison added to results with key 'trade_comparison'", "INFO")
                     else:
                         self.selective_logger.log_detailed("Trade comparison returned no results", "WARNING")
                 else:
@@ -713,6 +696,11 @@ class UltimateEfficiencyEngine:
             print(f"   Sortino Ratio      :        {sortino_ratio:>6.2f}")
             print(f"   Recovery Factor    :       {recovery_factor:>7.2f}")
             print(f"   Calmar Ratio       :       {calmar_ratio:>7.2f}")
+            print()
+            
+            # Display Portfolio Timeline Visualization
+            print(f"📈 PORTFOLIO TIMELINE VISUALIZATION:")
+            self._display_portfolio_timeline(options_pnl, initial_capital, final_portfolio, max_drawdown_pct, max_drawdown_amount)
             print()
             
             # Display Trade Statistics
@@ -1080,6 +1068,154 @@ class UltimateEfficiencyEngine:
         # Log individual indicator timing if available
         if indicator_timing:
             self.selective_logger.log_performance(indicator_timing, "INDICATOR_TIMING")
+    
+    def _display_portfolio_timeline(
+        self, 
+        options_pnl: Dict[str, Any], 
+        initial_capital: float, 
+        final_portfolio: float, 
+        max_drawdown_pct: float, 
+        max_drawdown_amount: float
+    ) -> None:
+        """Display ASCII timeline visualization of portfolio journey."""
+        try:
+            # Calculate key timeline values
+            if max_drawdown_pct > 0 and max_drawdown_amount > 0:
+                # Calculate peak portfolio value from drawdown data
+                peak_portfolio = max_drawdown_amount / (max_drawdown_pct / 100)
+                trough_portfolio = peak_portfolio - max_drawdown_amount
+            else:
+                # No drawdown case
+                peak_portfolio = max(initial_capital, final_portfolio)
+                trough_portfolio = initial_capital
+            
+            # Determine chart scale (add 10% padding)
+            max_value = max(initial_capital, peak_portfolio, final_portfolio)
+            min_value = min(initial_capital, trough_portfolio, final_portfolio)
+            chart_range = max_value - min_value
+            chart_max = max_value + (chart_range * 0.1)
+            chart_min = min_value - (chart_range * 0.1)
+            
+            # Ensure minimum chart range for readability
+            if chart_range < 20000:
+                chart_max = max_value + 10000
+                chart_min = min_value - 10000
+            
+            # Create scale markers (5 levels)
+            scale_levels = []
+            for i in range(5):
+                value = chart_min + (chart_max - chart_min) * (4-i) / 4
+                scale_levels.append(value)
+            
+            # Calculate positions for timeline points
+            def get_chart_position(value, level):
+                if chart_max == chart_min:
+                    return 20  # Default position
+                relative_pos = (value - chart_min) / (chart_max - chart_min)
+                return int(20 + relative_pos * 40)  # Scale to 60-char width
+            
+            print("   Portfolio Mountain Journey:")
+            print("   " + "=" * 65)
+            
+            # Create simplified mountain visualization with fixed positions
+            chart_width = 60
+            start_x = 8      # Start position
+            peak_x = 25      # Peak position  
+            trough_x = 35    # Trough position
+            final_x = 50     # Final position
+            
+            # Draw each level of the mountain
+            for level_idx, scale_value in enumerate(scale_levels):
+                line = f"   ₹{scale_value:>8,.0f} |"
+                chart_line = [' '] * chart_width
+                
+                # Determine what to draw at this level based on portfolio values
+                level_height = scale_value
+                
+                # Check if this is the peak level
+                if abs(level_height - peak_portfolio) < (chart_max - chart_min) * 0.15:
+                    chart_line[peak_x] = '★'
+                    line += "".join(chart_line) + f"  ← Peak: ₹{peak_portfolio:>8,.0f}"
+                
+                # Check if this is the start level  
+                elif abs(level_height - initial_capital) < (chart_max - chart_min) * 0.15:
+                    chart_line[start_x] = '●'
+                    # Draw upward slope from start to peak
+                    for x in range(start_x + 1, peak_x):
+                        chart_line[x] = '/'
+                    line += "".join(chart_line) + "  Start: ₹{:>8,.0f}".format(initial_capital)
+                
+                # Check if this is the final level
+                elif abs(level_height - final_portfolio) < (chart_max - chart_min) * 0.15:
+                    chart_line[final_x] = '●'
+                    # Draw upward slope from trough to final
+                    for x in range(trough_x + 1, final_x):
+                        chart_line[x] = '/'
+                    line += "".join(chart_line) + f"  ← Final: ₹{final_portfolio:>8,.0f}"
+                
+                # Check if this is the trough level
+                elif abs(level_height - trough_portfolio) < (chart_max - chart_min) * 0.15:
+                    chart_line[trough_x] = '★'
+                    # Draw downward slope from peak to trough
+                    for x in range(peak_x + 1, trough_x):
+                        chart_line[x] = '\\'
+                    line += "".join(chart_line) + f"  ← Trough: ₹{trough_portfolio:>8,.0f}"
+                
+                # Draw intermediate slopes for levels between key points
+                else:
+                    # Draw ascending slope if we're between start and peak
+                    if initial_capital < level_height < peak_portfolio:
+                        # Calculate how far along the slope we are
+                        slope_progress = (level_height - initial_capital) / (peak_portfolio - initial_capital)
+                        slope_start = int(start_x + slope_progress * 3)
+                        slope_end = int(peak_x - (1 - slope_progress) * 3)
+                        for x in range(max(slope_start, start_x), min(slope_end + 1, peak_x)):
+                            if 0 <= x < chart_width:
+                                chart_line[x] = '/'
+                    
+                    # Draw descending slope if we're between peak and trough  
+                    elif trough_portfolio < level_height < peak_portfolio:
+                        # Calculate how far along the descent we are
+                        descent_progress = (peak_portfolio - level_height) / (peak_portfolio - trough_portfolio)
+                        slope_start = int(peak_x + descent_progress * 2)
+                        slope_end = int(trough_x - (1 - descent_progress) * 2)
+                        for x in range(max(slope_start, peak_x), min(slope_end + 1, trough_x)):
+                            if 0 <= x < chart_width:
+                                chart_line[x] = '\\'
+                    
+                    # Draw recovery slope if we're between trough and final
+                    elif trough_portfolio < level_height < final_portfolio:
+                        # Calculate recovery progress
+                        recovery_progress = (level_height - trough_portfolio) / (final_portfolio - trough_portfolio)
+                        slope_start = int(trough_x + recovery_progress * 2)
+                        slope_end = int(final_x - (1 - recovery_progress) * 2)
+                        for x in range(max(slope_start, trough_x), min(slope_end + 1, final_x)):
+                            if 0 <= x < chart_width:
+                                chart_line[x] = '/'
+                    
+                    line += "".join(chart_line)
+                
+                print(line)
+            
+            # Add timeline labels
+            print("   " + " " * 12 + "|" + " " * 20 + "|" + " " * 20 + "|")
+            print("   " + " " * 10 + "Start" + " " * 15 + "Peak" + " " * 15 + "Final")
+            print("   " + " " * 8 + f"₹{initial_capital:,.0f}" + " " * 8 + f"₹{peak_portfolio:,.0f}" + " " * 8 + f"₹{final_portfolio:,.0f}")
+            print()
+            
+            # Add summary statistics
+            recovery_amount = final_portfolio - trough_portfolio
+            recovery_pct = (recovery_amount / trough_portfolio * 100) if trough_portfolio > 0 else 0
+            
+            print(f"   Journey Summary:")
+            print(f"   • Peak Reached        : ₹{peak_portfolio:>10,.2f} (+{((peak_portfolio - initial_capital) / initial_capital * 100):>5.1f}%)")
+            print(f"   • Maximum Drawdown    : ₹{max_drawdown_amount:>10,.2f} (-{max_drawdown_pct:>5.1f}%)")
+            print(f"   • Recovery from Trough: ₹{recovery_amount:>10,.2f} (+{recovery_pct:>5.1f}%)")
+            print(f"   • Net Journey Result  : ₹{final_portfolio - initial_capital:>10,.2f} (+{((final_portfolio - initial_capital) / initial_capital * 100):>5.1f}%)")
+            
+        except Exception as e:
+            self.selective_logger.log_detailed(f"Error displaying portfolio timeline: {e}", "WARNING", "SYSTEM")
+            print(f"   Timeline visualization unavailable: {e}")
     
     def close_connections(self) -> None:
         """Close all database connections and cleanup resources."""

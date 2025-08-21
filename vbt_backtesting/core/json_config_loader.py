@@ -255,6 +255,14 @@ class JSONConfigLoader:
                     ]
                     for prev_indicator in prev_ohlc_indicators:
                         indicator_keys[prev_indicator] = f"Previous candle {prev_indicator.replace('previous_candle_', '').upper()}"
+                elif indicator_name == 'signal_candle':
+                    # Signal candle generates 4 sub-indicators
+                    signal_candle_indicators = [
+                        'signal_candle_open', 'signal_candle_high', 
+                        'signal_candle_low', 'signal_candle_close'
+                    ]
+                    for signal_indicator in signal_candle_indicators:
+                        indicator_keys[signal_indicator] = f"Signal candle {signal_indicator.replace('signal_candle_', '').upper()} - captured at entry, persistent until exit"
                 else:
                     # Single indicators (VWAP, Bollinger Bands, etc.)
                     indicator_keys[indicator_name] = f"{indicator_name.upper()} indicator"

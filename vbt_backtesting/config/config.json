@@ -37,7 +37,7 @@
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2025-06-01",
+    "start_date": "2024-03-01",
     "end_date": "2025-06-30", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,
@@ -49,17 +49,17 @@
     "require_complete_calculation": true,
     "rsi": {
       "enabled": true,
-      "periods": [10, 20],
+      "periods": [14, 21],
       "talib_function": "RSI"
     },
     "sma": {
       "enabled": true,
-      "periods": [10, 20, 50, 200],
+      "periods": [9, 20, 50, 200],
       "talib_function": "SMA"
     },
     "ema": {
       "enabled": true,
-      "periods": [10, 20, 50, 200],
+      "periods": [9, 20, 50, 200],
       "talib_function": "EMA"
     },
     "vwap": {
@@ -81,6 +81,10 @@
     "previous_candle_ohlc": {
       "enabled": true,
       "description": "Previous candle OHLC data"
+    },
+    "signal_candle": {
+      "enabled": true,
+      "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
     }
   },
   "validation": {
@@ -143,7 +147,28 @@
       "calmar_ratio": true
     },
     "case_comparison": true,
-    "export_path": "output/vbt_reports/" 
+    "export_path": "output/vbt_reports/",
+    "emergency_bypass_export": false,
+    "export_control": {
+      "signals_csv": true,
+      "trades_csv": true,
+      "trade_comparison_csv": false,
+      "comprehensive_csv": false,
+      "excel": false,
+      "json": false
+    },
+    "conditional_exports": {
+      "export_signals_only_if_trades": false,
+      "skip_large_signals_csv": false,
+      "export_minimal_mode": false,
+      "max_signals_csv_size_mb": 900
+    },
+    "performance_mode": {
+      "streaming_export": false,
+      "chunk_size": 1000,
+      "parallel_export": false,
+      "memory_optimization": true
+    }
   },
   "trade_comparison": {
     "enabled": false,
