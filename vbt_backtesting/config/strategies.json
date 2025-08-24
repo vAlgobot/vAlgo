@@ -9,6 +9,9 @@
         "priority": 1,
         "description": "CPR & SMA strategy",
         "entry": "(close > cpr_r1) & (close > previous_day_high) & (close > sma_9) & (sma_9 > sma_20) & (sma_9 > sma_50) & (sma_9 > sma_200) & (close > previous_candle_high) & (ltp_high > high)",
+        "SL_Method": "signal_candle",
+        "TP_Method": "signal_candle",
+        "Max_Sl_points": "45",
         "exit": "(close < sma_9)",
         "OptionType": "CALL",
         "StrikeType": "ATM"
@@ -34,17 +37,19 @@
         "status": "Active",
         "priority": 1,
         "description": "CPR & SMA strategy",
-        "entry": "(close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (close > previous_candle_open) & (close > open) & (close > previous_candle_high) & (ltp_high > high)",
-        "exit": "(close < ema_9)",
+        "entry": "(close > previous_day_high) & (close > cpr_r1) & (close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (previous_candle_close > previous_candle_open) & (close > previous_candle_high) & (close > open)",
+        "exit": "(ltp_low < sl_price) | (ltp_high > tp_price)",
         "OptionType": "CALL",
-        "StrikeType": "ATM"
+        "StrikeType": "ATM",
+        "position_size": "1"
+        
       },
       "CPR_EMA_PUT": {
         "status": "Active",
         "priority": 1,
         "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
-        "entry": "(close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (close < previous_candle_open) & (close < open) & (close < previous_candle_low) & (ltp_low < low)",
-        "exit": "(close > ema_9)",
+        "entry": "(close < previous_day_low) &  (close < cpr_s1) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (previous_candle_close < previous_candle_open) & (close < previous_candle_low) & (close < open)",
+        "exit": "(ltp_high > sl_price) | (ltp_low < tp_price)",
         "OptionType": "PUT",
         "StrikeType": "ATM",
         "position_size": "1"

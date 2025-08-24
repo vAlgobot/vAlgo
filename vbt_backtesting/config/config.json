@@ -37,7 +37,7 @@
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2024-03-01",
+    "start_date": "2025-06-01",
     "end_date": "2025-06-30", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,
@@ -85,6 +85,16 @@
     "signal_candle": {
       "enabled": true,
       "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
+    },
+    "SL_TP_levels": {
+      "SL_TP_Method": "signal_candle_range_exit",
+      "Max_Sl_points": "45",
+      "RiskRewardRatio": "1:2",
+      "buffer_sl_points": "5",
+      "buffer_tp_points": "3",
+      "enabled": true,
+      "debug_export_enabled": true,
+      "description": "Signal candle OHLC data captured at entry identify target and stop loss using signal candle and persistent until exit - handled by VectorBT Signal Generator"
     }
   },
   "validation": {

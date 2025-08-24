@@ -60,7 +60,8 @@ class ResultsCompiler(ProcessorBase):
         all_indicators: Dict[str, pd.Series],
         trade_signals: Dict[str, Any],
         performance_results: Dict[str, Any],
-        signal_candle_data: Dict[str, pd.Series] = None
+        signal_candle_data: Dict[str, pd.Series] = None,
+        sl_tp_data: Dict[str, pd.Series] = None
     ) -> Dict[str, Any]:
         """
         Compile comprehensive results from all processing phases.
@@ -71,6 +72,7 @@ class ResultsCompiler(ProcessorBase):
             trade_signals: Extracted trade signals and pairs
             performance_results: Options P&L calculation results
             signal_candle_data: Signal candle data from signal generation
+            sl_tp_data: SL/TP levels data from signal generation
             
         Returns:
             Dictionary with comprehensive analysis results
@@ -108,6 +110,23 @@ class ResultsCompiler(ProcessorBase):
                     print(f"🔍 DEBUG: After merge signal candle indicators: {merged_signal_candles}")
                 else:
                     print(f"🔍 DEBUG: No signal candle data to merge")
+                
+                # Merge SL/TP data with combined indicators for CSV export
+                if sl_tp_data:
+                    print(f"🔍 DEBUG: SL/TP data to merge: {[(k, type(v), len(v) if hasattr(v, '__len__') else 'no len') for k, v in sl_tp_data.items()]}")
+                    
+                    # Debug: Check if SL/TP arrays contain actual values
+                    import numpy as np
+                    for k, v in sl_tp_data.items():
+                        if hasattr(v, '__len__') and len(v) > 0:
+                            valid_count = np.sum(~np.isnan(v)) if isinstance(v, np.ndarray) else sum(pd.notna(v))
+                            print(f"🔍 DEBUG: {k} has {valid_count} valid (non-NaN) values out of {len(v)}")
+                    
+                    combined_indicators.update(sl_tp_data)
+                    self.log_detailed(f"Added {len(sl_tp_data)} SL/TP indicators to results", "INFO")
+                    print(f"🎯 Added SL/TP data to combined indicators: {list(sl_tp_data.keys())}")
+                else:
+                    print(f"🔍 DEBUG: No SL/TP data to merge")
                 
                 # Compile indicators summary
                 indicators_summary = self._compile_indicators_summary(combined_indicators)

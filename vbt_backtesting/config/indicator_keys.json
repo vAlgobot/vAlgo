@@ -1,9 +1,9 @@
 {
   "metadata": {
-    "generated_at": "2025-08-21T07:23:29.931612",
+    "generated_at": "2025-08-24T23:45:13.155619",
     "version": "1.0",
     "approach": "config_based_simple",
-    "total_keys": 46,
+    "total_keys": 48,
     "source": "config.json enabled indicators"
   },
   "market_data_keys": {
@@ -54,7 +54,9 @@
     "signal_candle_open": "Signal candle OPEN - captured at entry, persistent until exit",
     "signal_candle_high": "Signal candle HIGH - captured at entry, persistent until exit",
     "signal_candle_low": "Signal candle LOW - captured at entry, persistent until exit",
-    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit"
+    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit",
+    "sl_price": "Stop Loss price - calculated at entry using signal candle range, persistent until exit",
+    "tp_price": "Take Profit price - calculated at entry using signal candle range, persistent until exit"
   },
   "all_available_keys": {
     "close": "Closing price series (5m)",
@@ -102,7 +104,9 @@
     "signal_candle_open": "Signal candle OPEN - captured at entry, persistent until exit",
     "signal_candle_high": "Signal candle HIGH - captured at entry, persistent until exit",
     "signal_candle_low": "Signal candle LOW - captured at entry, persistent until exit",
-    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit"
+    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit",
+    "sl_price": "Stop Loss price - calculated at entry using signal candle range, persistent until exit",
+    "tp_price": "Take Profit price - calculated at entry using signal candle range, persistent until exit"
   },
   "usage_examples": {
     "simple_condition": "close > ma_20",
@@ -112,7 +116,10 @@
     "signal_candle_stop_loss": "(close < signal_candle_low)",
     "signal_candle_take_profit": "(close > signal_candle_high * 1.02)",
     "signal_candle_breakout_exit": "(close < signal_candle_close * 0.98)",
-    "signal_candle_range_exit": "(close < signal_candle_low) | (close > signal_candle_high)"
+    "signal_candle_range_exit": "(close < signal_candle_low) | (close > signal_candle_high)",
+    "sl_tp_exit": "(ltp_close <= sl_price) | (ltp_high >= tp_price)",
+    "stop_loss_only": "ltp_close <= sl_price",
+    "take_profit_only": "ltp_high >= tp_price"
   },
   "configuration_source": {
     "enabled_indicators": {
@@ -194,6 +201,20 @@
         "talib_function": null,
         "config": {
           "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
+        }
+      },
+      "SL_TP_levels": {
+        "enabled": true,
+        "periods": [],
+        "talib_function": null,
+        "config": {
+          "SL_TP_Method": "signal_candle_range_exit",
+          "Max_Sl_points": "45",
+          "RiskRewardRatio": "1:2",
+          "buffer_sl_points": "5",
+          "buffer_tp_points": "3",
+          "debug_export_enabled": true,
+          "description": "Signal candle OHLC data captured at entry identify target and stop loss using signal candle and persistent until exit - handled by VectorBT Signal Generator"
         }
       }
     },

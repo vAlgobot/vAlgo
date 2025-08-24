@@ -138,15 +138,17 @@ def create_time_masks(timestamps: pd.Index, config_loader=None) -> Tuple[np.ndar
 def vectorized_position_tracking(entry_conditions: np.ndarray, 
                                 exit_conditions: np.ndarray, 
                                 trading_hours_mask: np.ndarray, 
-                                forced_exit_mask: np.ndarray) -> np.ndarray:
+                                forced_exit_mask: np.ndarray,
+                                indicator_timestamps: np.ndarray = None) -> np.ndarray:
     """
-    Fixed position tracking with proper state management for multiple entries.
+    Fixed position tracking with proper state management for multiple entries and exit timestamp validation.
     
     Args:
         entry_conditions: Boolean array of entry signals
         exit_conditions: Boolean array of exit signals  
         trading_hours_mask: Boolean array for valid trading hours
         forced_exit_mask: Boolean array for forced exits at 15:15
+        indicator_timestamps: Array of Indicator_Timestamp values for exit blacklist tracking
         
     Returns:
         Integer array with signals: 1 (Entry), -1 (Exit), 0 (Hold)
@@ -161,19 +163,42 @@ def vectorized_position_tracking(entry_conditions: np.ndarray,
         # Combine natural exits with forced exits (config-based)
         all_exits = exit_conditions | forced_exit_mask
         
+        # NEW: Exit timestamp blacklist for unique entry validation
+        exit_timestamp_blacklist = set()
         
-        # CRITICAL: Sequential position state tracking for multiple entries
+        # CRITICAL: Sequential position state tracking for multiple entries with timestamp validation
         in_position = False
+        entries_blocked = 0
+        exits_tracked = 0
         
         for i in range(n):
+            current_indicator_time = indicator_timestamps[i] if indicator_timestamps is not None else None
+            
             if valid_entries[i] and not in_position:
+                # NEW: Check if this Indicator_Timestamp was used for previous exit
+                if current_indicator_time is not None and current_indicator_time in exit_timestamp_blacklist:
+                    signals[i] = 0  # Skip this entry - timestamp already used
+                    entries_blocked += 1
+                    continue
+                    
                 signals[i] = 1      # Entry signal
                 in_position = True
             elif all_exits[i] and in_position:
                 signals[i] = -1     # Exit signal
                 in_position = False # RESET position state to allow new entries
+                
+                # NEW: Add this exit's Indicator_Timestamp to blacklist
+                if current_indicator_time is not None:
+                    exit_timestamp_blacklist.add(current_indicator_time)
+                    exits_tracked += 1
             else:
                 signals[i] = 0      # Hold signal (neutral state)
+        
+        # Debug logging for timestamp validation
+        if indicator_timestamps is not None:
+            total_entries_attempted = np.sum(valid_entries)
+            total_entries_allowed = np.sum(signals == 1)
+            print(f"🛡️ Exit Timestamp Validation: {entries_blocked} entries blocked, {exits_tracked} exits tracked, {total_entries_allowed}/{total_entries_attempted} entries allowed")
         
         return signals
         
@@ -237,171 +262,6 @@ class VectorBTSignalGenerator(ProcessorBase):
             self.log_detailed(f"Error checking indicator enabled status for '{indicator_name}': {e}", "WARNING")
             return True  # Fail-safe: assume enabled if unable to check
     
-    def generate_signals(
-        self, 
-        market_data: pd.DataFrame, 
-        indicators: Dict[str, pd.Series]
-    ) -> Dict[str, Any]:
-        """
-        Ultra-fast VectorBT signal generation using IndicatorFactory pattern.
-        
-        Args:
-            market_data: OHLCV DataFrame
-            indicators: Dictionary of calculated indicators
-            
-        Returns:
-            Dictionary containing VectorBT signals for each strategy case
-        """
-        try:
-            with self.measure_execution_time("signal_generation"):
-                # DETAILED TIMING: Start overall timing
-                overall_start = time.time()
-                timing_breakdown = {}
-                
-                data_length = len(market_data)
-                vectorbt_signals = {}
-                all_signal_candle_data = {}  # Collect signal candle data from all strategies
-                
-                # TIMING: Config setup
-                config_start = time.time()
-                enabled_strategies = self.config_loader.get_enabled_strategies_cases()
-                ltp_timeframe_enabled = self.config_loader.main_config.get('trading', {}).get('ltp_timeframe', False)
-                timing_breakdown['config_setup'] = time.time() - config_start
-                
-                self.log_major_component(
-                    f"Processing {data_length} data points for {len(enabled_strategies)} strategy groups",
-                    "SIGNAL_GENERATION"
-                )
-                
-                print(f"🎯 Using VectorBT IndicatorFactory Pattern (Ultra Fast)")
-                print(f"   🔄 Processing: {data_length} data points for {len(enabled_strategies)} strategy groups...")
-                print(f"🚀 PERFORMANCE: {self._performance_mode} mode enabled")
-                
-                merged_data_for_reports = None
-                
-                # SHARED CONTEXT OPTIMIZATION: Build expensive multi-timeframe context ONCE for all strategies
-                shared_context_start = time.time()
-                ltp_timeframe_enabled = self.config_loader.main_config.get('trading', {}).get('ltp_timeframe', False)
-                
-                if ltp_timeframe_enabled:
-                    print(f"🚀 PERFORMANCE: Building shared multi-timeframe context for ALL strategies...")
-                    shared_eval_context, shared_merged_data = self._build_multi_timeframe_context(market_data, indicators)
-                    merged_data_for_reports = shared_merged_data
-                    print(f"🚀 PERFORMANCE: Shared context built in {time.time() - shared_context_start:.3f}s")
-                else:
-                    print(f"🚀 PERFORMANCE: Building shared single-timeframe context for ALL strategies...")
-                    shared_eval_context = {
-                        'close': market_data['close'],
-                        'open': market_data['open'],
-                        'high': market_data['high'],
-                        'low': market_data['low'],
-                        'volume': market_data['volume'],
-                        **indicators  # Add all calculated indicators
-                    }
-                    shared_merged_data = None
-                    print(f"🚀 PERFORMANCE: Shared context built in {time.time() - shared_context_start:.3f}s")
-                
-                # Add numpy for mathematical operations
-                shared_eval_context['np'] = np
-                timing_breakdown['shared_context_building'] = time.time() - shared_context_start
-                
-                # TIMING: Strategy processing (now using shared context)
-                strategy_start = time.time()
-                strategy_times = {}
-                
-                # Process each strategy group using SHARED CONTEXT
-                for group_name, group_config in enabled_strategies.items():
-                    # Process each case in the strategy group
-                    for case_name, case_config in group_config['cases'].items():
-                        if not case_config.get('enabled', True):
-                            continue
-                        
-                        strategy_case_start = time.time()
-                        print(f"   🚀 Processing {group_name}.{case_name} with SHARED context...")
-                        
-                        # Generate signals using SHARED context (no expensive context building per case)
-                        signal_results = self._generate_signals_direct_with_context(
-                            eval_context=shared_eval_context,
-                            merged_data=shared_merged_data,
-                            case_config=case_config,
-                            group_name=group_name,
-                            case_name=case_name
-                        )
-                        
-                        strategy_case_time = time.time() - strategy_case_start
-                        strategy_times[f"{group_name}.{case_name}"] = strategy_case_time
-                        
-                        # Store VectorBT signal results with strategy configuration
-                        strategy_key = f"{group_name}.{case_name}"
-                        vectorbt_signals[strategy_key] = {
-                            'signals': signal_results.get('vectorbt_result', None),
-                            'signals_array': signal_results.get('signals_array', np.zeros(data_length)),
-                            'entry_count': signal_results['entry_count'],
-                            'exit_count': signal_results['exit_count'],
-                            'generation_time': signal_results['generation_time'],
-                            'option_type': signal_results.get('option_type', 'CALL'),
-                            'strike_type': signal_results.get('strike_type', 'ATM'),
-                            'position_size': signal_results.get('position_size', 1)
-                        }
-                        
-                        # Collect signal candle data from this strategy
-                        strategy_signal_candle_data = signal_results.get('signal_candle_data', {})
-                        if strategy_signal_candle_data:
-                            # Merge signal candle data (use last strategy's data since they should be the same)
-                            all_signal_candle_data.update(strategy_signal_candle_data)
-                            self.log_detailed(f"Collected signal candle data from {strategy_key}: {list(strategy_signal_candle_data.keys())}", "DEBUG")
-                        
-                        # Collect merged_data for reports (same for all cases in LTP mode)
-                        if ltp_timeframe_enabled and merged_data_for_reports is None:
-                            merged_data_for_reports = signal_results.get('merged_data')
-                            if merged_data_for_reports is not None:
-                                self.log_detailed(f"Captured merged 1m data from {group_name}.{case_name} for reports", "INFO")
-                        
-                        # Log case results
-                        print(f"     Generated {signal_results['entry_count']} entries, {signal_results['exit_count']} exits in {signal_results['generation_time']:.3f}s")
-                        print(f"     🎯 Strike: {signal_results.get('strike_type', 'ATM')}, Option: {signal_results.get('option_type', 'CALL')}")
-                
-                # TIMING: Complete timing summary
-                timing_breakdown['total_strategy_processing'] = time.time() - strategy_start
-                timing_breakdown['total_signal_generation'] = time.time() - overall_start
-                
-                self.log_major_component(
-                    f"VectorBT signal generation complete: {len(vectorbt_signals)} strategy signals generated",
-                    "SIGNAL_GENERATION"
-                )
-                
-                print(f"VectorBT signal generation complete:")
-                print(f"   📊 Strategy signals generated: {len(vectorbt_signals)}")
-                print(f"   ⚡ Using proven IndicatorFactory pattern")
-                
-                # DETAILED TIMING OUTPUT
-                print(f"\n🕐 DETAILED SIGNAL GENERATION TIMING:")
-                print(f"   config_setup: {timing_breakdown['config_setup']:.3f}s")
-                print(f"   shared_context_building: {timing_breakdown['shared_context_building']:.3f}s")
-                print(f"   total_strategy_processing: {timing_breakdown['total_strategy_processing']:.3f}s")
-                print(f"   total_signal_generation: {timing_breakdown['total_signal_generation']:.3f}s")
-                
-                print(f"\n⏱️  INDIVIDUAL STRATEGY TIMING:")
-                for strategy_name, strategy_time in strategy_times.items():
-                    print(f"   {strategy_name}: {strategy_time:.3f}s")
-                
-                # Return signals with merged_data and signal_candle_data
-                result = {'signals': vectorbt_signals}
-                if ltp_timeframe_enabled and merged_data_for_reports is not None:
-                    result['merged_data'] = merged_data_for_reports
-                    print(f"   🔄 Including merged 1m data for reports: {len(merged_data_for_reports)} records")
-                
-                # Include signal candle data if available and indicator is enabled
-                if all_signal_candle_data and self._is_indicator_enabled('signal_candle'):
-                    result['signal_candle_data'] = all_signal_candle_data
-                    print(f"   📊 Including signal candle data: {list(all_signal_candle_data.keys())}")
-                
-                return result
-                
-        except Exception as e:
-            self.log_detailed(f"Error in VectorBT signal generation: {e}", "ERROR")
-            raise ConfigurationError(f"VectorBT signal generation failed: {e}")
-    
     def generate_signals_with_context(
         self, 
         market_data: pd.DataFrame, 
@@ -433,6 +293,7 @@ class VectorBTSignalGenerator(ProcessorBase):
                 data_length = len(shared_eval_context.get('close', []))
                 vectorbt_signals = {}
                 all_signal_candle_data = {}  # Collect signal candle data from all strategies
+                all_sl_tp_data = {}  # Collect SL/TP data from all strategies
                 
                 # TIMING: Config setup
                 config_start = time.time()
@@ -450,6 +311,28 @@ class VectorBTSignalGenerator(ProcessorBase):
                 print(f"🚀 PERFORMANCE: Using PRE-BUILT context from main engine - NO context building!")
                 
                 merged_data_for_reports = shared_merged_data
+                
+                # SL/TP DETECTION: Check all strategies upfront and add arrays to shared context if needed
+                any_strategy_uses_sl_tp = False
+                for group_name, group_config in enabled_strategies.items():
+                    if group_config.get('status') != 'Active':
+                        continue
+                    for case_name, case_config in group_config.get('cases', {}).items():
+                        if case_config.get('status') != 'Active':
+                            continue
+                        exit_condition = case_config.get('exit', '')
+                        if 'sl_price' in exit_condition or 'tp_price' in exit_condition:
+                            any_strategy_uses_sl_tp = True
+                            break
+                    if any_strategy_uses_sl_tp:
+                        break
+                
+                if any_strategy_uses_sl_tp:
+                    # Add SL/TP arrays to shared eval_context so they're available for all strategies
+                    shared_eval_context['sl_price'] = np.full(data_length, np.nan)
+                    shared_eval_context['tp_price'] = np.full(data_length, np.nan)
+                    shared_eval_context['entry_point'] = np.full(data_length, np.nan)
+                    print(f"✅ Added SL/TP + entry_point arrays to SHARED eval_context: {data_length} elements")
                 
                 # SKIP CONTEXT BUILDING - Use pre-built context directly
                 timing_breakdown['shared_context_building'] = 0.0  # Already built in main engine
@@ -504,6 +387,19 @@ class VectorBTSignalGenerator(ProcessorBase):
                                 self._merge_signal_candle_data(all_signal_candle_data, strategy_signal_candle_data, strategy_key)
                                 self.log_detailed(f"Merged signal candle data from {strategy_key}: {list(strategy_signal_candle_data.keys())}", "DEBUG")
                         
+                        # Collect SL/TP data from this strategy
+                        strategy_sl_tp_data = signal_results.get('sl_tp_data', {})
+                        if strategy_sl_tp_data:
+                            # MERGE SL/TP data from all strategies (instead of overwriting)
+                            if not all_sl_tp_data:
+                                # First strategy: initialize the combined data
+                                all_sl_tp_data = strategy_sl_tp_data.copy()
+                                self.log_detailed(f"Initialized SL/TP data from {strategy_key}: {list(strategy_sl_tp_data.keys())}", "DEBUG")
+                            else:
+                                # Subsequent strategies: merge with existing data
+                                self._merge_sl_tp_data(all_sl_tp_data, strategy_sl_tp_data, strategy_key)
+                                self.log_detailed(f"Merged SL/TP data from {strategy_key}: {list(strategy_sl_tp_data.keys())}", "DEBUG")
+                        
                         # Collect merged_data for reports (same for all cases in LTP mode)
                         if shared_merged_data is not None and merged_data_for_reports is None:
                             merged_data_for_reports = signal_results.get('merged_data')
@@ -549,6 +445,11 @@ class VectorBTSignalGenerator(ProcessorBase):
                     result['signal_candle_data'] = all_signal_candle_data
                     print(f"   📊 Including signal candle data: {list(all_signal_candle_data.keys())}")
                 
+                # Include SL/TP data if available
+                if all_sl_tp_data:
+                    result['sl_tp_data'] = all_sl_tp_data
+                    print(f"   🎯 Including SL/TP data: {list(all_sl_tp_data.keys())}")
+                
                 return result
                 
         except Exception as e:
@@ -593,6 +494,7 @@ class VectorBTSignalGenerator(ProcessorBase):
             
             detailed_timing['setup'] = time.time() - setup_start
             
+            print(f"🔍 DEBUG Strategy {case_name}: Entry='{entry_condition}', Exit='{exit_condition}'")
             if self._performance_mode != 'ultra':
                 print(f"🔍 DEBUG Strategy Processing: {group_name}.{case_name}")
                 print(f"   Entry condition: {entry_condition}")
@@ -611,6 +513,8 @@ class VectorBTSignalGenerator(ProcessorBase):
                 # Single timeframe mode: use 5m timestamps
                 evaluation_index = eval_context['close'].index if hasattr(eval_context['close'], 'index') else range(len(eval_context['close']))
                 self.log_detailed(f"Using 5m timestamps for signal evaluation: {len(evaluation_index)} records", "DEBUG")
+            
+            # SL/TP arrays are now initialized in shared context if needed
             
             # TIMING: Signal evaluation phase (now the main work)
             evaluation_start = time.time()
@@ -636,8 +540,21 @@ class VectorBTSignalGenerator(ProcessorBase):
                     entry_signals = pd.Series(entry_signals, index=evaluation_index).fillna(False).astype(bool)
                 
                 # PERFORMANCE: Simplified logging
+                entry_count = entry_signals.sum()
                 if self._performance_mode == 'ultra':
-                    print(f"🚀 PERFORMANCE: {group_name}.{case_name} - {entry_signals.sum()} entry signals found")
+                    print(f"🚀 PERFORMANCE: {group_name}.{case_name} - {entry_count} entry signals found")
+                    
+                # DEBUG: Entry signal detection logging
+                if self._is_debug_export_enabled():
+                    print(f"🔍 DEBUG: {group_name}.{case_name} - {entry_count} entry signals detected")
+                    if entry_count > 0:
+                        entry_indices = np.where(entry_signals)[0]
+                        print(f"🔍 DEBUG: Entry signal indices: {entry_indices[:5]}{'...' if len(entry_indices) > 5 else ''}")
+                    else:
+                        print(f"🔍 DEBUG: No entry signals - check entry condition: {entry_condition}")
+                    
+                    # DEBUG STAGE 1: Export eval_context after entry trigger validation (with blacklist check results)
+                    self._export_eval_context_debug_csv(eval_context, evaluation_index, f"after_entry_trigger_validation_{entry_count}_signals", group_name, case_name)
                         
             except Exception as e:
                 self.log_detailed(f"Entry condition evaluation failed for {group_name}.{case_name}: {e}", "ERROR")
@@ -651,6 +568,27 @@ class VectorBTSignalGenerator(ProcessorBase):
                 eval_context['signal_candle_low'] = np.full(data_length, np.nan)
                 eval_context['signal_candle_close'] = np.full(data_length, np.nan)
                 self.log_detailed(f"Initialized signal candle arrays in eval_context: {data_length} elements", "DEBUG")
+            
+            # ENTRY_POINT INITIALIZATION: Always add entry_point for ALL strategies (for reference in CSV exports)
+            if 'entry_point' not in eval_context:
+                eval_context['entry_point'] = np.full(data_length, np.nan)
+                self.log_detailed(f"Initialized entry_point array in eval_context: {data_length} elements", "DEBUG")
+                print(f"✅ DEBUG: entry_point array initialized for {group_name}.{case_name} (for CSV export reference)")
+            
+            # SL_TP_LEVELS INITIALIZATION: Add SL/TP arrays to eval_context for exit condition evaluation (only if needed)
+            uses_sl_price = 'sl_price' in exit_condition
+            uses_tp_price = 'tp_price' in exit_condition
+            if (uses_sl_price or uses_tp_price) and 'sl_price' not in eval_context:
+                eval_context['sl_price'] = np.full(data_length, np.nan)
+                eval_context['tp_price'] = np.full(data_length, np.nan)
+                self.log_detailed(f"Initialized SL/TP levels arrays in eval_context: {data_length} elements", "DEBUG")
+                print(f"🎯 DEBUG: SL/TP arrays initialized for {group_name}.{case_name} - uses_sl_price: {uses_sl_price}, uses_tp_price: {uses_tp_price}")
+            elif uses_sl_price or uses_tp_price:
+                self.log_detailed(f"SL/TP arrays already exist in eval_context", "DEBUG")
+                print(f"🎯 DEBUG: SL/TP arrays already present for {group_name}.{case_name}")
+            else:
+                self.log_detailed(f"Exit condition does not use SL/TP, but entry_point still available for CSV export", "DEBUG")
+                print(f"🎯 DEBUG: Exit condition for {group_name}.{case_name} does not use SL/TP (but entry_point available for reference)")
             
             # SIGNAL CANDLE PRE-CALCULATION: Check if exit condition uses signal candle data AND indicator is enabled
             if 'signal_candle' in exit_condition and self._is_indicator_enabled('signal_candle'):
@@ -689,6 +627,149 @@ class VectorBTSignalGenerator(ProcessorBase):
                 except Exception as e:
                     self.log_detailed(f"Direct signal candle calculation failed: {e}, using NaN values", "WARNING")
             
+            # SL_TP_LEVELS PRE-CALCULATION: Check if exit condition uses SL/TP data
+            if uses_sl_price or uses_tp_price:
+                self.log_detailed(f"SL/TP levels exit condition detected for {group_name}.{case_name}, calculating directly", "INFO")
+                
+                # Get market data for SL/TP calculation
+                if merged_data is not None:
+                    # Multi-timeframe mode: use merged data
+                    open_data = merged_data['open'].values
+                    high_data = merged_data['high'].values
+                    low_data = merged_data['low'].values
+                    close_data = merged_data['close'].values
+                else:
+                    # Single timeframe mode: use evaluation context data
+                    open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
+                    high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
+                    low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
+                    close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
+                
+                # OPTIMIZED: Calculate SL/TP levels directly using shared context
+                # This eliminates the need to calculate during position tracking loop
+                try:
+                    print(f"🎯 EXECUTING SL/TP CALCULATION: _calculate_sl_tp_indicator_direct for {group_name}.{case_name}")
+                    print(f"   OptionType: {case_config.get('OptionType', 'NOT_SET')}")
+                    
+                    # Add case identification to config for debugging
+                    case_config_with_names = case_config.copy()
+                    case_config_with_names['group_name'] = group_name
+                    case_config_with_names['case_name'] = case_name
+                    
+                    # Use direct calculation method with strategy configuration and entry condition
+                    sl_tp_calc_data = self._calculate_sl_tp_indicator_direct(
+                        open_data, high_data, low_data, close_data,
+                        entry_signals.values, evaluation_index, case_config_with_names, entry_condition, eval_context
+                    )
+                    
+                    # Store calculation data for later population (after position tracking)
+                    eval_context['_sl_tp_calc_data'] = sl_tp_calc_data
+                    
+                    # For now, initialize empty arrays for exit conditions (will be populated later)
+                    array_length = len(evaluation_index)
+                    eval_context['sl_price'] = np.full(array_length, np.nan)
+                    eval_context['tp_price'] = np.full(array_length, np.nan) 
+                    eval_context['entry_point'] = np.full(array_length, np.nan)
+                    
+                    print(f"🎯 SL/TP VALUES CALCULATED: {len(sl_tp_calc_data['entry_indices'])} entries, will populate arrays after position tracking")
+                    
+                except Exception as e:
+                    self.log_detailed(f"Direct SL/TP calculation failed: {e}, using NaN values", "WARNING")
+                    print(f"❌ SL/TP pre-calculation failed: {e}")
+                
+                # DEBUG STAGE 2: Export eval_context after signal candle generation and SL/TP creation
+                if self._is_debug_export_enabled():
+                    self._export_eval_context_debug_csv(eval_context, evaluation_index, "after_signal_candle_and_sl_tp_creation", group_name, case_name)
+            else:
+                # DEBUG: Export eval_context before position tracking (shows initial state, config-controlled)
+                if self._is_debug_export_enabled():
+                    self._export_eval_context_debug_csv(eval_context, evaluation_index, "before_position_tracking", group_name, case_name)
+            
+            # CRITICAL FIX: Pre-populate SL/TP arrays BEFORE exit condition evaluation
+            uses_sl_price = 'sl_price' in exit_condition
+            uses_tp_price = 'tp_price' in exit_condition
+            
+            if uses_sl_price or uses_tp_price:
+                print(f"🔧 CRITICAL FIX: Pre-populating SL/TP arrays for {group_name}.{case_name} before exit evaluation")
+                
+                # Check if we have SL/TP calculation data that needs to be populated
+                if '_sl_tp_calc_data' in eval_context:
+                    sl_tp_calc_data = eval_context['_sl_tp_calc_data']
+                    
+                    if sl_tp_calc_data.get('needs_population', False):
+                        print(f"   🔧 PRE-POPULATING SL/TP arrays from calculated data")
+                        
+                        # Get entry indices and calculated values
+                        entry_indices = sl_tp_calc_data['entry_indices']
+                        sl_values = sl_tp_calc_data['sl_values']
+                        tp_values = sl_tp_calc_data['tp_values']
+                        entry_points = sl_tp_calc_data.get('entry_points')
+                        array_length = sl_tp_calc_data['array_length']
+                        
+                        if len(entry_indices) > 0 and len(sl_values) > 0 and len(tp_values) > 0:
+                            # Create temporary position tracking to get proper entry-exit pairs
+                            temp_entry_signals = pd.Series(False, index=evaluation_index)
+                            temp_entry_signals.iloc[entry_indices] = True
+                            
+                            # Apply basic position tracking to get entry-exit pairs
+                            trading_hours_mask, forced_exit_mask = create_time_masks(evaluation_index, self.config_loader)
+                            
+                            # Extract indicator timestamps for blacklist tracking
+                            indicator_timestamps = None
+                            if merged_data is not None and 'Indicator_Timestamp' in merged_data.columns:
+                                indicator_timestamps = merged_data['Indicator_Timestamp'].values
+                            elif 'Indicator_Timestamp' in eval_context:
+                                indicator_timestamps = eval_context['Indicator_Timestamp'].values if hasattr(eval_context['Indicator_Timestamp'], 'values') else eval_context['Indicator_Timestamp']
+                            
+                            temp_position_signals = vectorized_position_tracking(
+                                temp_entry_signals.values,
+                                np.zeros(len(temp_entry_signals), dtype=bool),  # No exits yet, just entry tracking
+                                trading_hours_mask,
+                                forced_exit_mask,
+                                indicator_timestamps  # NEW: Pass indicator timestamps for validation
+                            )
+                            
+                            # Find actual entry positions
+                            actual_entry_positions = np.where(temp_position_signals == 1)[0]
+                            
+                            if len(actual_entry_positions) > 0:
+                                # Populate SL/TP arrays for the position duration
+                                sl_prices, tp_prices, entry_point_array = self._populate_sl_tp_arrays_vectorized(
+                                    array_length,
+                                    actual_entry_positions[:len(sl_values)],  # Match array sizes
+                                    sl_values[:len(actual_entry_positions)],  # Match array sizes  
+                                    tp_values[:len(actual_entry_positions)],  # Match array sizes
+                                    entry_points[:len(actual_entry_positions)] if entry_points is not None else None,
+                                    temp_position_signals
+                                )
+                                
+                                # Update eval_context with populated arrays
+                                eval_context['sl_price'] = sl_prices
+                                eval_context['tp_price'] = tp_prices
+                                eval_context['entry_point'] = entry_point_array
+                                
+                                # Log success
+                                sl_valid = np.sum(~np.isnan(sl_prices))
+                                tp_valid = np.sum(~np.isnan(tp_prices))
+                                print(f"   ✅ PRE-POPULATED SL/TP: {sl_valid} SL values, {tp_valid} TP values")
+                            else:
+                                print(f"   ⚠️ No actual entry positions found during pre-population")
+                        else:
+                            print(f"   ⚠️ Insufficient SL/TP data for pre-population")
+                    else:
+                        print(f"   ℹ️  SL/TP data exists but doesn't need population")
+                else:
+                    print(f"   ⚠️ No SL/TP calculation data found")
+                
+                # Verify SL/TP arrays are populated
+                sl_valid = np.sum(~np.isnan(eval_context.get('sl_price', np.array([np.nan]))))
+                tp_valid = np.sum(~np.isnan(eval_context.get('tp_price', np.array([np.nan]))))
+                print(f"   🔍 Final SL/TP state: SL={sl_valid} valid, TP={tp_valid} valid")
+            
+            # DEBUG STAGE 3: Export eval_context before exit trigger evaluation
+            if self._is_debug_export_enabled():
+                self._export_eval_context_debug_csv(eval_context, evaluation_index, f"before_exit_trigger_evaluation", group_name, case_name)
+            
             # OPTIMIZED: Fast exit signal evaluation using vectorized operations
             try:
                 # PERFORMANCE OPTIMIZATION: Use cached compiled conditions for ultra mode
@@ -708,8 +789,28 @@ class VectorBTSignalGenerator(ProcessorBase):
                     exit_signals = exit_signals.fillna(False).astype(bool)
                 else:
                     exit_signals = pd.Series(exit_signals, index=evaluation_index).fillna(False).astype(bool)
+                    
+                # DEBUG: Log exit signal results
+                exit_count = exit_signals.sum()
+                print(f"🚨 EXIT EVALUATION RESULT for {group_name}.{case_name}: {exit_count} exit signals found")
+                
+                if exit_count > 0 and (uses_sl_price or uses_tp_price):
+                    exit_indices = np.where(exit_signals)[0]
+                    print(f"   🎯 Exit signal indices: {exit_indices[:5]}{'...' if len(exit_indices) > 5 else ''}")
+                    
+                    # Sample some SL/TP vs LTP values for debugging
+                    if len(exit_indices) > 0:
+                        idx = exit_indices[0]
+                        if idx < len(eval_context.get('sl_price', [])):
+                            sl_val = eval_context['sl_price'][idx] if not np.isnan(eval_context['sl_price'][idx]) else 'NaN'
+                            tp_val = eval_context['tp_price'][idx] if not np.isnan(eval_context['tp_price'][idx]) else 'NaN'
+                            ltp_high = eval_context.get('ltp_high', [0])[idx] if idx < len(eval_context.get('ltp_high', [])) else 'N/A'
+                            ltp_low = eval_context.get('ltp_low', [0])[idx] if idx < len(eval_context.get('ltp_low', [])) else 'N/A'
+                            print(f"   🔍 Sample exit candle {idx}: SL={sl_val}, TP={tp_val}, LTP_H={ltp_high}, LTP_L={ltp_low}")
+                
             except Exception as e:
                 self.log_detailed(f"Exit condition evaluation failed for {group_name}.{case_name}: {e}", "ERROR")
+                print(f"❌ EXIT CONDITION EVALUATION ERROR: {e}")
                 exit_signals = pd.Series(False, index=evaluation_index)
             
             detailed_timing['signal_evaluation'] = time.time() - evaluation_start
@@ -720,16 +821,28 @@ class VectorBTSignalGenerator(ProcessorBase):
             # Apply time masks
             trading_hours_mask, forced_exit_mask = create_time_masks(evaluation_index, self.config_loader)
             
-            # OPTIMIZED: Fast vectorized position tracking + efficient signal candle updates
+            # Extract indicator timestamps for exit blacklist tracking
+            indicator_timestamps = None
+            if merged_data is not None and 'Indicator_Timestamp' in merged_data.columns:
+                indicator_timestamps = merged_data['Indicator_Timestamp'].values
+                print(f"🔍 DEBUG: Using merged_data Indicator_Timestamp for exit blacklist tracking")
+            elif 'Indicator_Timestamp' in eval_context:
+                indicator_timestamps = eval_context['Indicator_Timestamp'].values if hasattr(eval_context['Indicator_Timestamp'], 'values') else eval_context['Indicator_Timestamp']
+                print(f"🔍 DEBUG: Using eval_context Indicator_Timestamp for exit blacklist tracking")
+            else:
+                print(f"⚠️ WARNING: No Indicator_Timestamp found - exit blacklist validation disabled")
+            
+            # OPTIMIZED: Fast vectorized position tracking with exit timestamp validation
             position_signals = vectorized_position_tracking(
                 entry_signals.values,
                 exit_signals.values, 
                 trading_hours_mask,
-                forced_exit_mask
+                forced_exit_mask,
+                indicator_timestamps  # NEW: Pass indicator timestamps for exit blacklist validation
             )
             
             # EFFICIENT: Update signal candle data based on position signals
-            signal_candle_data = self._update_signal_candle_efficient(
+            signal_candle_data, sl_tp_data = self._update_signal_candle_efficient(
                 position_signals,
                 eval_context,
                 merged_data,
@@ -738,6 +851,103 @@ class VectorBTSignalGenerator(ProcessorBase):
             
             detailed_timing['position_tracking'] = time.time() - tracking_start
             
+            # POPULATE SL/TP ARRAYS: Now that we have position_signals, populate SL/TP arrays properly
+            if '_sl_tp_calc_data' in eval_context:
+                print(f"🔧 POPULATING SL/TP arrays with position_signals for proper entry-exit pairs")
+                sl_tp_calc_data = eval_context['_sl_tp_calc_data']
+                
+                if sl_tp_calc_data.get('needs_population', False):
+                    # RECALCULATE SL/TP using actual position_signals entries (more robust than mapping)
+                    print(f"🔧 RECALCULATING SL/TP values using actual position_signals entries")
+                    
+                    # Find actual entry positions from position tracking
+                    actual_entry_positions = np.where(position_signals == 1)[0]
+                    print(f"   Original calculation entries: {len(sl_tp_calc_data['entry_indices'])}")
+                    print(f"   Actual position entries: {len(actual_entry_positions)}")
+                    
+                    if len(actual_entry_positions) > 0:
+                        # Get market data for recalculation
+                        if merged_data is not None:
+                            # Multi-timeframe mode: use merged data
+                            calc_open_data = merged_data['open'].values
+                            calc_high_data = merged_data['high'].values
+                            calc_low_data = merged_data['low'].values
+                            calc_close_data = merged_data['close'].values
+                        else:
+                            # Single timeframe mode: use evaluation context data
+                            calc_open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
+                            calc_high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
+                            calc_low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
+                            calc_close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
+                        
+                        # Build OHLC data for actual entries
+                        actual_entry_ohlc = np.column_stack([
+                            calc_open_data[actual_entry_positions],
+                            calc_high_data[actual_entry_positions], 
+                            calc_low_data[actual_entry_positions],
+                            calc_close_data[actual_entry_positions]
+                        ])
+                        
+                        # Extract case_config from stored data
+                        case_config_data = {k: v for k, v in case_config.items()}  
+                        
+                        # Recalculate entry points for actual positions
+                        actual_entry_points = self._extract_dynamic_entry_points(
+                            actual_entry_positions, entry_condition, case_config_data, eval_context
+                        )
+                        
+                        # Recalculate SL/TP values for actual positions
+                        actual_sl_values, actual_tp_values = self._calculate_sl_tp_vectorized(
+                            actual_entry_ohlc, case_config_data, actual_entry_points
+                        )
+                        
+                        # Debug: Check what values we're passing to array population
+                        print(f"🔍 DEBUG: Values being passed to array population:")
+                        print(f"   actual_sl_values: {actual_sl_values if len(actual_sl_values) > 0 else 'empty'}")
+                        print(f"   actual_tp_values: {actual_tp_values if len(actual_tp_values) > 0 else 'empty'}")
+                        print(f"   actual_entry_points: {actual_entry_points if len(actual_entry_points) > 0 else 'empty'}")
+                        print(f"   actual_entry_positions: {actual_entry_positions}")
+                        
+                        # Now populate arrays with actual values and position_signals
+                        sl_prices, tp_prices, entry_point_array = self._populate_sl_tp_arrays_vectorized(
+                            sl_tp_calc_data['array_length'],
+                            actual_entry_positions,  # Use actual positions
+                            actual_sl_values,        # Use recalculated values
+                            actual_tp_values,        # Use recalculated values
+                            actual_entry_points,     # Use recalculated entry points
+                            position_signals
+                        )
+                        
+                        print(f"✅ RECALCULATED SL/TP for {len(actual_entry_positions)} actual entries")
+                    else:
+                        print(f"⚠️ No actual entry positions found - initializing empty arrays")
+                        # No entries, initialize empty arrays
+                        sl_prices = np.full(sl_tp_calc_data['array_length'], np.nan)
+                        tp_prices = np.full(sl_tp_calc_data['array_length'], np.nan) 
+                        entry_point_array = np.full(sl_tp_calc_data['array_length'], np.nan)
+                    
+                    # Update eval_context with properly populated arrays
+                    eval_context['sl_price'] = sl_prices
+                    eval_context['tp_price'] = tp_prices
+                    eval_context['entry_point'] = entry_point_array
+                    
+                    # Count valid values
+                    sl_valid = np.sum(~np.isnan(sl_prices))
+                    tp_valid = np.sum(~np.isnan(tp_prices))
+                    entry_valid = np.sum(~np.isnan(entry_point_array))
+                    
+                    print(f"✅ SL/TP ARRAYS POPULATED with position_signals:")
+                    print(f"   SL values: {sl_valid}/{len(sl_prices)} valid")
+                    print(f"   TP values: {tp_valid}/{len(tp_prices)} valid") 
+                    print(f"   Entry points: {entry_valid}/{len(entry_point_array)} valid")
+                    
+                    # Clean up temporary data
+                    del eval_context['_sl_tp_calc_data']
+                else:
+                    print(f"⚠️ SL/TP calculation data found but doesn't need population")
+            else:
+                print(f"🔍 No SL/TP calculation data found in eval_context")
+            
             # Convert position signals back to entry/exit boolean arrays
             final_entry_signals = pd.Series(position_signals == 1, index=evaluation_index)
             final_exit_signals = pd.Series(position_signals == -1, index=evaluation_index)
@@ -745,6 +955,10 @@ class VectorBTSignalGenerator(ProcessorBase):
             # Count final signals
             entry_count = final_entry_signals.sum()
             exit_count = final_exit_signals.sum()
+            
+            # DEBUG STAGE 4: Export eval_context after exit trigger processing (with blacklist updates)
+            if self._is_debug_export_enabled():
+                self._export_eval_context_debug_csv(eval_context, evaluation_index, f"after_exit_trigger_processing_{exit_count}_exits", group_name, case_name)
             
             # Signal candle data is now calculated during position tracking
             
@@ -819,346 +1033,41 @@ class VectorBTSignalGenerator(ProcessorBase):
                     }
                 result['signal_candle_data'] = signal_candle_data  # Include signal candle values for CSV export
             
+            # Include SL/TP data for CSV export - ALWAYS use data from eval_context
+            # The correct SL/TP values are stored in eval_context after calculation
+            result['sl_tp_data'] = {
+                'sl_price': eval_context.get('sl_price', np.full(len(evaluation_index), np.nan)),
+                'tp_price': eval_context.get('tp_price', np.full(len(evaluation_index), np.nan)),
+                'entry_point': eval_context.get('entry_point', np.full(len(evaluation_index), np.nan))
+            }
+            
+            # Debug: Check SL/TP data being packaged for export
+            sl_price_data = result['sl_tp_data']['sl_price']
+            tp_price_data = result['sl_tp_data']['tp_price']
+            if hasattr(sl_price_data, '__len__'):
+                sl_valid = np.sum(~np.isnan(sl_price_data))
+                tp_valid = np.sum(~np.isnan(tp_price_data))
+                print(f"📦 PACKAGING SL/TP for export: {group_name}.{case_name}")
+                print(f"   SL values: {sl_valid}/{len(sl_price_data)} valid")
+                print(f"   TP values: {tp_valid}/{len(tp_price_data)} valid")
+                if sl_valid > 0:
+                    first_valid_sl = next((x for x in sl_price_data if not np.isnan(x)), "no valid values")
+                    first_valid_tp = next((x for x in tp_price_data if not np.isnan(x)), "no valid values")
+                    print(f"   First valid SL: {first_valid_sl}, TP: {first_valid_tp}")
+                    # Verify these match our expected values
+                    if first_valid_sl == 24590.75 and first_valid_tp == 24437.75:
+                        print(f"   ✅ CORRECT VALUES PACKAGED!")
+                    else:
+                        print(f"   ❌ WRONG VALUES PACKAGED!")
+            
+            print(f"📦 FINAL: Using eval_context SL/TP data for {group_name}.{case_name}")
+            
             return result
             
         except Exception as e:
             self.log_detailed(f"Error in optimized signal generation for {group_name}.{case_name}: {e}", "ERROR")
             raise ConfigurationError(f"Signal generation failed for {group_name}.{case_name}: {e}")
     
-    def _generate_signals_direct(
-        self,
-        market_data: pd.DataFrame,
-        indicators: Dict[str, pd.Series],
-        case_config: Dict[str, Any],
-        group_name: str,
-        case_name: str
-    ) -> Dict[str, Any]:
-        """
-        Direct signal generation using condition evaluation with multi-timeframe support.
-        
-        Implements LTP timeframe control:
-        - When ltp_timeframe=True: Merges 1m execution data with 5m indicators
-        - When ltp_timeframe=False: Uses existing 5m evaluation (backward compatible)
-        
-        Args:
-            market_data: 5m OHLCV DataFrame (filtered)
-            indicators: Dictionary of calculated 5m indicators
-            case_config: Case-specific configuration
-            group_name: Strategy group name
-            case_name: Case name
-            
-        Returns:
-            Dictionary with signal generation results
-        """
-        try:
-            start_time = time.time()
-            detailed_timing = {}
-            
-            # TIMING: Setup phase
-            setup_start = time.time()
-            entry_condition = case_config.get('entry', '')
-            exit_condition = case_config.get('exit', '')
-            
-            if not entry_condition or not exit_condition:
-                raise ConfigurationError(f"Entry/exit conditions not defined for {group_name}.{case_name}")
-            
-            trading_config = self.config_loader.main_config.get('trading', {})
-            ltp_timeframe_enabled = trading_config.get('ltp_timeframe', False)
-            detailed_timing['setup'] = time.time() - setup_start
-            
-            if self._performance_mode != 'ultra':
-                print(f"🔍 DEBUG Strategy Processing: {group_name}.{case_name}")
-                print(f"   LTP timeframe enabled: {ltp_timeframe_enabled}")
-                print(f"   Entry condition: {entry_condition}")
-                print(f"   Exit condition: {exit_condition}")
-            
-            # TIMING: Context building phase
-            context_start = time.time()
-            current_merged_data = None  # Track merged data for this case
-            if ltp_timeframe_enabled:
-                self.log_detailed(f"Multi-timeframe processing enabled for {group_name}.{case_name}", "INFO")
-                eval_context, current_merged_data = self._build_multi_timeframe_context(market_data, indicators)
-            else:
-                self.log_detailed(f"Single timeframe processing for {group_name}.{case_name}", "INFO") 
-                # Create standard single-timeframe evaluation context
-                eval_context = {
-                    'close': market_data['close'],
-                    'open': market_data['open'],
-                    'high': market_data['high'],
-                    'low': market_data['low'],
-                    'volume': market_data['volume'],
-                    **indicators  # Add all calculated indicators
-                }
-            
-            # Add numpy for mathematical operations
-            eval_context['np'] = np
-            
-            # Get the appropriate index for signal evaluation (depends on timeframe mode)
-            if ltp_timeframe_enabled:
-                # Multi-timeframe mode: use 1m timestamps for evaluation 
-                evaluation_index = eval_context['ltp_close'].index
-                self.log_detailed(f"Using 1m timestamps for signal evaluation: {len(evaluation_index)} records", "DEBUG")
-            else:
-                # Single timeframe mode: use original 5m timestamps
-                evaluation_index = market_data.index
-                self.log_detailed(f"Using 5m timestamps for signal evaluation: {len(evaluation_index)} records", "DEBUG")
-            
-            detailed_timing['context_building'] = time.time() - context_start
-            
-            # Export evaluation context for debugging (skip in ultra performance mode)
-            if self._performance_mode != 'ultra':
-                self._export_eval_context_sample(eval_context, evaluation_index, group_name, case_name)
-            elif self._performance_mode == 'ultra':
-                print("🚀 PERFORMANCE: Skipping CSV export in ultra mode")
-            
-            # DEBUG: Log evaluation context for PUT strategy before evaluation (skip in ultra mode)
-            if case_name == 'multi_sma_trend_put' and self._performance_mode != 'ultra':
-                print(f"🔍 DEBUG PUT Strategy - About to evaluate conditions:")
-                print(f"   Evaluation index length: {len(evaluation_index)}")
-                print(f"   First timestamp: {evaluation_index[0] if len(evaluation_index) > 0 else 'None'}")
-                print(f"   Entry condition: {entry_condition}")
-                # Check if required keys exist in eval_context
-                required_keys = ['close', 'previous_day_low', 'sma_10', 'sma_50', 'sma_200', 'ltp_low', 'low']
-                missing_keys = [key for key in required_keys if key not in eval_context]
-                print(f"   Missing keys: {missing_keys if missing_keys else 'None'}")
-                if not missing_keys:
-                    print(f"   All required keys present for evaluation")
-
-            # TIMING: Signal evaluation phase
-            evaluation_start = time.time()
-            
-            # Evaluate entry signals
-            try:
-                if case_name == 'multi_sma_trend_put':
-                    print(f"🔍 DEBUG: About to eval() entry condition for PUT strategy")
-                
-                entry_signals = eval(entry_condition, {"__builtins__": {}}, eval_context)
-                
-                if case_name == 'multi_sma_trend_put':
-                    print(f"🔍 DEBUG: eval() completed successfully, result type: {type(entry_signals)}")
-                
-                if isinstance(entry_signals, pd.Series):
-                    entry_signals = entry_signals.fillna(False).astype(bool)
-                else:
-                    entry_signals = pd.Series(entry_signals, index=evaluation_index).fillna(False).astype(bool)
-                
-                if case_name == 'multi_sma_trend_put':
-                    print(f"🔍 DEBUG: Series conversion completed, length: {len(entry_signals)}")
-                
-                # DEBUG: Log condition evaluation for PUT strategy (skip in ultra mode)
-                if case_name == 'multi_sma_trend_put' and self._performance_mode != 'ultra':
-                    print(f"🔍 DEBUG PUT Strategy Condition Evaluation:")
-                    print(f"   Entry condition: {entry_condition}")
-                    print(f"   Number of TRUE signals: {entry_signals.sum()}")
-                    print(f"   Total rows evaluated: {len(entry_signals)}")
-                    
-                    # ALWAYS show first row data for debugging
-                    first_row_data = {}
-                    for key in ['close', 'previous_day_low', 'sma_10', 'sma_50', 'sma_200', 'ltp_low', 'low']:
-                        if key in eval_context and len(eval_context[key]) > 0:
-                            first_row_data[key] = eval_context[key].iloc[0]
-                    print(f"   First row data: {first_row_data}")
-                    
-                    # Manual condition check for first row
-                    if len(first_row_data) >= 7:
-                        cond1 = first_row_data['close'] < first_row_data['previous_day_low']
-                        cond2 = first_row_data['close'] < first_row_data['sma_10']
-                        cond3 = first_row_data['sma_10'] < first_row_data['sma_50']
-                        cond4 = first_row_data['sma_50'] < first_row_data['sma_200']
-                        cond5 = first_row_data['ltp_low'] < first_row_data['low']
-                        print(f"   Manual condition check (first row):")
-                        print(f"     close < previous_day_low: {cond1} ({first_row_data['close']} < {first_row_data['previous_day_low']})")
-                        print(f"     close < sma_10: {cond2} ({first_row_data['close']} < {first_row_data['sma_10']})")
-                        print(f"     sma_10 < sma_50: {cond3} ({first_row_data['sma_10']} < {first_row_data['sma_50']})")
-                        print(f"     sma_50 < sma_200: {cond4} ({first_row_data['sma_50']} < {first_row_data['sma_200']})")
-                        print(f"     ltp_low < low: {cond5} ({first_row_data['ltp_low']} < {first_row_data['low']})")
-                        print(f"     Overall manual result: {cond1 and cond2 and cond3 and cond4 and cond5}")
-                        print(f"     First eval result: {entry_signals.iloc[0]}")
-                    
-                    if entry_signals.sum() > 0:
-                        first_true_idx = entry_signals.idxmax() if entry_signals.any() else None
-                        print(f"   ✅ First TRUE signal at: {first_true_idx}")
-                        print(f"   First 5 entry signals: {entry_signals.head().tolist()}")
-                    else:
-                        print(f"   ❌ No TRUE entry signals found")
-                elif case_name == 'multi_sma_trend_put' and self._performance_mode == 'ultra':
-                    print(f"🚀 PERFORMANCE: PUT strategy - {entry_signals.sum()} signals found (debug skipped)")
-                        
-            except Exception as e:
-                self.log_detailed(f"Entry condition evaluation failed for {group_name}.{case_name}: {e}", "ERROR")
-                if case_name == 'multi_sma_trend_put':
-                    print(f"🔍 DEBUG: Exception during PUT strategy evaluation: {e}")
-                    print(f"   Exception type: {type(e)}")
-                    import traceback
-                    print(f"   Traceback: {traceback.format_exc()}")
-                entry_signals = pd.Series(False, index=evaluation_index)
-            
-            # Evaluate exit signals
-            try:
-                exit_signals = eval(exit_condition, {"__builtins__": {}}, eval_context)
-                if isinstance(exit_signals, pd.Series):
-                    exit_signals = exit_signals.fillna(False).astype(bool)
-                else:
-                    exit_signals = pd.Series(exit_signals, index=evaluation_index).fillna(False).astype(bool)
-            except Exception as e:
-                self.log_detailed(f"Exit condition evaluation failed for {group_name}.{case_name}: {e}", "ERROR")
-                exit_signals = pd.Series(False, index=evaluation_index)
-            
-            detailed_timing['signal_evaluation'] = time.time() - evaluation_start
-            
-            # TIMING: Position tracking phase
-            tracking_start = time.time()
-            
-            # APPLY VECTORIZED POSITION TRACKING (Key improvement from working system)
-            trading_hours_mask, forced_exit_mask = create_time_masks(evaluation_index, self.config_loader)
-            
-            # Generate proper signals using vectorized position tracking
-            position_signals = vectorized_position_tracking(
-                entry_signals.values,
-                exit_signals.values, 
-                trading_hours_mask,
-                forced_exit_mask
-            )
-            
-            detailed_timing['position_tracking'] = time.time() - tracking_start
-            
-            # Convert position signals back to entry/exit boolean arrays using correct index
-            final_entry_signals = pd.Series(position_signals == 1, index=evaluation_index)
-            final_exit_signals = pd.Series(position_signals == -1, index=evaluation_index)
-            
-            # Count final signals (after position tracking)
-            entry_count = final_entry_signals.sum()
-            exit_count = final_exit_signals.sum()
-            
-            # SIGNAL CANDLE CALCULATION: Calculate signal candle with final entry/exit signals
-            signal_candle_data = {}
-            try:
-                if 'signal_candle_' in exit_condition and (entry_count > 0 or exit_count > 0) and self._is_indicator_enabled('signal_candle'):
-                    # Get market data for direct signal candle calculation
-                    if ltp_timeframe_enabled and hasattr(self, '_current_merged_data'):
-                        # Multi-timeframe mode: use merged data if available
-                        open_data = self._current_merged_data['open'].values
-                        high_data = self._current_merged_data['high'].values
-                        low_data = self._current_merged_data['low'].values
-                        close_data = self._current_merged_data['close'].values
-                    else:
-                        # Single timeframe mode: use evaluation context data
-                        open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
-                        high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
-                        low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
-                        close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
-                    
-                    # OPTIMIZED: Calculate signal candle directly using shared context data
-                    # This eliminates SmartIndicatorEngine instantiation and DataFrame creation overhead
-                    signal_candle_results = self._calculate_signal_candle_direct(
-                        open_data, high_data, low_data, close_data,
-                        final_entry_signals.values, evaluation_index
-                    )
-                    
-                    # Store signal candle data for export
-                    signal_candle_data = signal_candle_results
-                    
-                    # Update eval_context with signal candle values for any remaining evaluation
-                    for key, values in signal_candle_results.items():
-                        eval_context[key] = pd.Series(values, index=evaluation_index)
-                    
-                    if self._performance_mode != 'ultra':
-                        valid_count = sum(~pd.isna(values) for values in signal_candle_results.values())
-                        print(f"   📊 Optimized signal candle calculation complete: {valid_count} candles with signal data")
-                        
-            except Exception as e:
-                self.log_detailed(f"Signal candle calculation failed for {group_name}.{case_name}: {e}", "WARNING")
-                # Initialize empty signal candle data
-                signal_candle_data = {
-                    'signal_candle_open': np.full(len(evaluation_index), np.nan),
-                    'signal_candle_high': np.full(len(evaluation_index), np.nan),
-                    'signal_candle_low': np.full(len(evaluation_index), np.nan),
-                    'signal_candle_close': np.full(len(evaluation_index), np.nan)
-                }
-            
-            # Create signals array for VectorBT compatibility
-            signals_array = np.column_stack([final_entry_signals.values, final_exit_signals.values])
-            
-            # Get option configuration from case - no defaults allowed
-            option_type = case_config.get('OptionType')
-            strike_type = case_config.get('StrikeType')
-            position_size = case_config.get('position_size', '1')  # Default to 1 if not specified
-            
-            # Validate required configuration parameters
-            if not option_type:
-                raise ConfigurationError(f"OptionType is required for case {group_name}.{case_name} in strategies.json")
-            
-            if not strike_type:
-                raise ConfigurationError(f"StrikeType is required for case {group_name}.{case_name} in strategies.json")
-            
-            # Convert position_size to integer and validate against limits
-            try:
-                position_size_int = int(position_size)
-                risk_config = self.main_config.get('risk_management', {})
-                position_size_limit = risk_config.get('position_size_limit', 5)
-                
-                if position_size_int > position_size_limit:
-                    self.log_detailed(f"Position size {position_size_int} exceeds limit {position_size_limit} for {group_name}.{case_name}, capping to limit", "WARNING")
-                    position_size_int = position_size_limit
-                elif position_size_int < 1:
-                    self.log_detailed(f"Position size {position_size_int} is less than 1 for {group_name}.{case_name}, setting to 1", "WARNING")
-                    position_size_int = 1
-                    
-            except (ValueError, TypeError):
-                self.log_detailed(f"Invalid position_size '{position_size}' for {group_name}.{case_name}, using default 1", "WARNING")
-                position_size_int = 1
-            
-            generation_time = time.time() - start_time
-            detailed_timing['total_generation_time'] = generation_time
-            
-            # DETAILED TIMING OUTPUT (skip in ultra mode for performance)
-            if self._performance_mode != 'ultra':
-                print(f"🕐 DETAILED TIMING for {group_name}.{case_name}:")
-                for phase, phase_time in detailed_timing.items():
-                    print(f"   {phase}: {phase_time:.3f}s")
-            elif self._performance_mode == 'ultra':
-                print(f"🚀 PERFORMANCE: {group_name}.{case_name} completed in {generation_time:.3f}s")
-            
-            # Signal candle data already prepared above during calculation
-            # Only prepare signal candle data if the indicator is enabled
-            result = {
-                'vectorbt_result': {
-                    'entries': final_entry_signals,
-                    'exits': final_exit_signals,
-                    'entry_count': entry_count,
-                    'exit_count': exit_count
-                },
-                'signals_array': signals_array,
-                'entry_count': entry_count,
-                'exit_count': exit_count,
-                'generation_time': generation_time,
-                'detailed_timing': detailed_timing,  # Include detailed timing breakdown
-                'option_type': option_type,
-                'strike_type': strike_type,
-                'position_size': position_size_int,
-                'group_name': group_name,
-                'case_name': case_name,
-                'merged_data': current_merged_data,  # Include merged data for LTP mode
-            }
-            
-            # Only include signal candle data if the indicator is enabled
-            if self._is_indicator_enabled('signal_candle'):
-                if not signal_candle_data:
-                    signal_candle_data = {
-                        'signal_candle_open': np.full(len(evaluation_index), np.nan),
-                        'signal_candle_high': np.full(len(evaluation_index), np.nan),
-                        'signal_candle_low': np.full(len(evaluation_index), np.nan),
-                        'signal_candle_close': np.full(len(evaluation_index), np.nan)
-                    }
-                result['signal_candle_data'] = signal_candle_data  # Include signal candle values for CSV export
-            
-            return result
-            
-        except Exception as e:
-            self.log_detailed(f"Error in direct signal generation for {group_name}.{case_name}: {e}", "ERROR")
-            
-            # No fallback signals - fail fast with proper error
-            raise ConfigurationError(f"Signal generation failed for {group_name}.{case_name}: {e}")
     
     def _build_multi_timeframe_context(
         self, 
@@ -1719,93 +1628,6 @@ class VectorBTSignalGenerator(ProcessorBase):
             self.log_detailed(f"Error in temporal alignment validation: {e}", "ERROR")
             return False
     
-    def validate_multi_timeframe_implementation(self) -> Dict[str, Any]:
-        """
-        Public method to run validation checks on multi-timeframe implementation.
-        
-        Can be called independently to verify the implementation works correctly.
-        
-        Returns:
-            Dictionary with validation results and details
-        """
-        try:
-            # Check if LTP timeframe is enabled
-            ltp_timeframe_enabled = self.config_loader.main_config.get('trading', {}).get('ltp_timeframe', False)
-            
-            if not ltp_timeframe_enabled:
-                return {
-                    'validation_status': 'SKIPPED',
-                    'reason': 'LTP timeframe not enabled in configuration',
-                    'ltp_timeframe_enabled': False
-                }
-            
-            print("🔍 Running Multi-Timeframe Implementation Validation...")
-            print("=" * 60)
-            
-            # Create a minimal test scenario
-            backtesting_config = self.config_loader.main_config.get('backtesting', {})
-            start_date = backtesting_config.get('start_date', '2024-06-01')
-            end_date = backtesting_config.get('end_date', '2024-06-02')  # Small date range for testing
-            
-            # Create test market data and indicators
-            test_market_data = pd.DataFrame({
-                'open': [23000, 23050, 23100],
-                'high': [23020, 23080, 23120], 
-                'low': [22980, 23040, 23090],
-                'close': [23010, 23070, 23110],
-                'volume': [1000, 1100, 1200]
-            }, index=pd.date_range(f'{start_date} 09:20:00', periods=3, freq='5T'))
-            
-            test_indicators = {
-                'EMA_10': pd.Series([22900, 22950, 23000], index=test_market_data.index),
-                'RSI_14': pd.Series([45, 55, 65], index=test_market_data.index)
-            }
-            
-            # Test the multi-timeframe context building
-            print("Testing multi-timeframe context building...")
-            try:
-                context, merged_test_data = self._build_multi_timeframe_context(test_market_data, test_indicators)
-                
-                validation_result = {
-                    'validation_status': 'PASSED',
-                    'ltp_timeframe_enabled': True,
-                    'context_variables': list(context.keys()),
-                    'context_size': len(next(iter(context.values()))) if context else 0,
-                    'has_1m_data': any(key.startswith('1m_') for key in context.keys()),
-                    'has_5m_indicators': any(key in ['EMA_10', 'RSI_14'] for key in context.keys()),
-                    'validation_details': 'Multi-timeframe context built successfully with validation checks'
-                }
-                
-                print("Multi-timeframe validation completed successfully!")
-                print(f"   Context variables: {len(context)} variables")
-                print(f"   1m data columns: {sum(1 for key in context.keys() if key.startswith('1m_'))}")
-                print(f"   5m indicators: {sum(1 for key in context.keys() if key in ['EMA_10', 'RSI_14'])}")
-                
-                return validation_result
-                
-            except Exception as context_error:
-                return {
-                    'validation_status': 'FAILED',
-                    'ltp_timeframe_enabled': True,
-                    'error': str(context_error),
-                    'validation_details': 'Multi-timeframe context building failed'
-                }
-                
-        except Exception as e:
-            return {
-                'validation_status': 'ERROR',
-                'error': str(e),
-                'validation_details': 'Validation process encountered an error'
-            }
-    
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """Get performance summary for signal generation."""
-        return {
-            'processor': self.processor_name,
-            'performance_stats': self.performance_stats,
-            'vectorbt_available': VECTORBT_AVAILABLE
-        }
-    
     def _export_eval_context_sample(self, eval_context: dict, evaluation_index: pd.Index, group_name: str, case_name: str) -> None:
         """
         Export evaluation context DataFrame sample for debugging signal generation.
@@ -1853,160 +1675,6 @@ class VectorBTSignalGenerator(ProcessorBase):
             
         except Exception as e:
             self.log_detailed(f"Error exporting eval context: {e}", "WARNING", "SIGNAL_GENERATOR")
-    
-    def _position_tracking_with_signal_candle(
-        self,
-        entry_conditions: np.ndarray,
-        exit_condition: str,
-        trading_hours_mask: np.ndarray,
-        forced_exit_mask: np.ndarray,
-        eval_context: Dict[str, Any],
-        merged_data: pd.DataFrame,
-        evaluation_index: pd.Index,
-        group_name: str,
-        case_name: str
-    ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
-        """
-        Custom position tracking with signal candle updates.
-        
-        This method implements the flow:
-        1. Entry Signal → Signal Candle Capture → Save in eval_context → Exit Signal evaluation
-        
-        Args:
-            entry_conditions: Boolean array of entry signals
-            exit_condition: Exit condition string to evaluate after signal candle updates
-            trading_hours_mask: Boolean array for valid trading hours
-            forced_exit_mask: Boolean array for forced exits
-            eval_context: Evaluation context to update with signal candle data
-            merged_data: Market data for signal candle capture
-            evaluation_index: Index for the data
-            group_name: Strategy group name for logging
-            case_name: Strategy case name for logging
-            
-        Returns:
-            Tuple of (position_signals, signal_candle_data)
-        """
-        try:
-            n = len(entry_conditions)
-            signals = np.zeros(n, dtype=int)
-            
-            # Initialize signal candle tracking variables
-            in_position = False
-            current_signal_open = np.nan
-            current_signal_high = np.nan
-            current_signal_low = np.nan
-            current_signal_close = np.nan
-            
-            # Get market data for signal candle capture
-            if merged_data is not None:
-                # Multi-timeframe mode: use merged data
-                open_data = merged_data['open'].values
-                high_data = merged_data['high'].values
-                low_data = merged_data['low'].values
-                close_data = merged_data['close'].values
-            else:
-                # Single timeframe mode: use evaluation context data
-                open_data = eval_context['open'].values if hasattr(eval_context['open'], 'values') else eval_context['open']
-                high_data = eval_context['high'].values if hasattr(eval_context['high'], 'values') else eval_context['high']
-                low_data = eval_context['low'].values if hasattr(eval_context['low'], 'values') else eval_context['low']
-                close_data = eval_context['close'].values if hasattr(eval_context['close'], 'values') else eval_context['close']
-            
-            # Process each candle sequentially to maintain state and update signal candle data
-            for i in range(n):
-                # Apply trading hours filter
-                if not trading_hours_mask[i]:
-                    continue
-                
-                # Check for forced exit first
-                if forced_exit_mask[i] and in_position:
-                    signals[i] = -1  # Exit signal
-                    in_position = False
-                    # Reset signal candle values after exit
-                    eval_context['signal_candle_open'][i+1:] = np.nan
-                    eval_context['signal_candle_high'][i+1:] = np.nan
-                    eval_context['signal_candle_low'][i+1:] = np.nan
-                    eval_context['signal_candle_close'][i+1:] = np.nan
-                    continue
-                
-                # Check for entry signal
-                if entry_conditions[i] and not in_position:
-                    signals[i] = 1  # Entry signal
-                    in_position = True
-                    
-                    # SIGNAL CANDLE CAPTURE: Capture current candle OHLC
-                    current_signal_open = open_data[i]
-                    current_signal_high = high_data[i]
-                    current_signal_low = low_data[i]
-                    current_signal_close = close_data[i]
-                    
-                    # UPDATE EVAL_CONTEXT: Make signal candle data available for exit conditions
-                    eval_context['signal_candle_open'][i:] = current_signal_open
-                    eval_context['signal_candle_high'][i:] = current_signal_high
-                    eval_context['signal_candle_low'][i:] = current_signal_low
-                    eval_context['signal_candle_close'][i:] = current_signal_close
-                    
-                    if self._performance_mode != 'ultra':
-                        print(f"   📊 Signal candle captured at index {i}: O={current_signal_open:.2f}, H={current_signal_high:.2f}, L={current_signal_low:.2f}, C={current_signal_close:.2f}")
-                
-                # Check for exit signal (only if in position)
-                elif in_position:
-                    # Evaluate exit condition with current signal candle data
-                    try:
-                        # Create a temporary eval context for this specific candle
-                        temp_context = {k: v[i] if hasattr(v, '__getitem__') and len(v) > i else v for k, v in eval_context.items()}
-                        temp_context['np'] = np  # Add numpy for mathematical operations
-                        
-                        # Evaluate exit condition
-                        exit_result = eval(exit_condition, {"__builtins__": {}}, temp_context)
-                        
-                        if exit_result:
-                            signals[i] = -1  # Exit signal
-                            in_position = False
-                            
-                            # Reset signal candle values after exit (for next entry)
-                            if i + 1 < n:
-                                eval_context['signal_candle_open'][i+1:] = np.nan
-                                eval_context['signal_candle_high'][i+1:] = np.nan
-                                eval_context['signal_candle_low'][i+1:] = np.nan
-                                eval_context['signal_candle_close'][i+1:] = np.nan
-                            
-                            if self._performance_mode != 'ultra':
-                                print(f"   📉 Position exited at index {i}, signal candle reset")
-                    
-                    except Exception as e:
-                        self.log_detailed(f"Exit condition evaluation failed at index {i} for {group_name}.{case_name}: {e}", "ERROR")
-                        # Continue without exit on evaluation error
-                
-                # If in position but no exit, maintain signal candle values (already set above)
-            
-            # Prepare signal candle data for export
-            signal_candle_data = {
-                'signal_candle_open': eval_context['signal_candle_open'].copy(),
-                'signal_candle_high': eval_context['signal_candle_high'].copy(),
-                'signal_candle_low': eval_context['signal_candle_low'].copy(),
-                'signal_candle_close': eval_context['signal_candle_close'].copy()
-            }
-            
-            # Count valid signal candle values for logging
-            valid_count = np.sum(~np.isnan(eval_context['signal_candle_open']))
-            if self._performance_mode != 'ultra':
-                print(f"   ✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
-            else:
-                print(f"✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
-            
-            return signals, signal_candle_data
-            
-        except Exception as e:
-            self.log_detailed(f"Error in position tracking with signal candle: {e}", "ERROR")
-            # Return empty results on error
-            signals = np.zeros(len(entry_conditions), dtype=int)
-            signal_candle_data = {
-                'signal_candle_open': np.full(len(entry_conditions), np.nan),
-                'signal_candle_high': np.full(len(entry_conditions), np.nan),
-                'signal_candle_low': np.full(len(entry_conditions), np.nan),
-                'signal_candle_close': np.full(len(entry_conditions), np.nan)
-            }
-            return signals, signal_candle_data
     
     def _update_signal_candle_efficient(
         self,
@@ -2092,17 +1760,27 @@ class VectorBTSignalGenerator(ProcessorBase):
             else:
                 print(f"✅ Signal candle calculation complete: {valid_count}/{n} candles with signal data")
             
-            return signal_candle_data
+            # SL/TP data should be handled in the main signal generation flow, not here
+            # This method is only responsible for signal candle data
+            sl_tp_data = {}
+            print(f"   🎯 SL/TP calculation SKIPPED in _update_signal_candle_efficient (handled elsewhere)")
+            
+            return signal_candle_data, sl_tp_data
             
         except Exception as e:
             self.log_detailed(f"Error in efficient signal candle update: {e}", "ERROR")
             # Return empty results on error
-            return {
+            signal_candle_data = {
                 'signal_candle_open': np.full(len(position_signals), np.nan),
                 'signal_candle_high': np.full(len(position_signals), np.nan),
                 'signal_candle_low': np.full(len(position_signals), np.nan),
                 'signal_candle_close': np.full(len(position_signals), np.nan)
             }
+            sl_tp_data = {
+                'sl_price': np.full(len(position_signals), np.nan),
+                'tp_price': np.full(len(position_signals), np.nan)
+            }
+            return signal_candle_data, sl_tp_data
     
     def _calculate_signal_candle_direct(
         self,
@@ -2245,6 +1923,810 @@ class VectorBTSignalGenerator(ProcessorBase):
         except Exception as e:
             self.log_detailed(f"Error merging signal candle data for {strategy_key}: {e}", "ERROR")
 
+    def _merge_sl_tp_data(
+        self, 
+        target_data: Dict[str, np.ndarray], 
+        source_data: Dict[str, np.ndarray], 
+        strategy_key: str
+    ) -> None:
+        """
+        Merge SL/TP data from multiple strategies.
+        
+        This method combines SL/TP data from different strategies,
+        ensuring that data from all strategies is preserved in the final export.
+        
+        Args:
+            target_data: The combined SL/TP data (modified in place)
+            source_data: SL/TP data from current strategy
+            strategy_key: Strategy identifier for logging
+        """
+        try:
+            import numpy as np
+            
+            for key in ['sl_price', 'tp_price', 'entry_point']:
+                if key in source_data and key in target_data:
+                    source_array = source_data[key]
+                    target_array = target_data[key]
+                    
+                    # Convert to numpy arrays if they aren't already
+                    if hasattr(source_array, 'values'):
+                        source_array = source_array.values
+                    if hasattr(target_array, 'values'):
+                        target_array = target_array.values
+                    
+                    # Merge: use source data where it's not NaN, keep target data otherwise
+                    source_valid = ~np.isnan(source_array)
+                    target_data[key][source_valid] = source_array[source_valid]
+                    
+                    # Count merged values for logging
+                    valid_count = np.sum(~np.isnan(target_array))
+                    self.log_detailed(f"{strategy_key} merged {key}: {valid_count} total valid values", "DEBUG")
+            
+            if self._performance_mode != 'ultra':
+                total_valid = np.sum(~np.isnan(target_data['sl_price']))
+                print(f"   🎯 SL/TP merge complete for {strategy_key}: {total_valid} total candles with data")
+                
+        except Exception as e:
+            self.log_detailed(f"Error merging SL/TP data for {strategy_key}: {e}", "ERROR")
+
+    def _calculate_sl_tp_levels(
+        self,
+        signal_open: float,
+        signal_high: float,
+        signal_low: float,
+        signal_close: float,
+        case_config: Dict[str, Any]
+    ) -> Tuple[float, float]:
+        """
+        Calculate Stop Loss and Take Profit levels using strategy configuration and dynamic entry points.
+        
+        Implements corrected SL/TP calculation logic using strategy OptionType and buffer points.
+        
+        Args:
+            signal_open: Signal candle open price
+            signal_high: Signal candle high price  
+            signal_low: Signal candle low price
+            signal_close: Signal candle close price
+            case_config: Strategy case configuration containing OptionType
+            
+        Returns:
+            Tuple of (sl_price, tp_price)
+        """
+        try:
+            # Get SL/TP configuration from config.json
+            sl_tp_config = self.config_loader.main_config.get('indicators', {}).get('SL_TP_levels', {})
+            sl_tp_method = sl_tp_config.get('SL_TP_Method', 'signal_candle_range_exit')
+            max_sl_points = float(sl_tp_config.get('Max_Sl_points', 45))
+            buffer_sl_points = float(sl_tp_config.get('buffer_sl_points', 5))
+            buffer_tp_points = float(sl_tp_config.get('buffer_tp_points', 3))
+            risk_reward_str = sl_tp_config.get('RiskRewardRatio', '1:2')
+            
+            # Parse risk-reward ratio (e.g., "1:2" -> risk=1, reward=2)
+            risk_part, reward_part = risk_reward_str.split(':')
+            risk_ratio = float(risk_part)
+            reward_ratio = float(reward_part)
+            
+            if sl_tp_method == 'signal_candle_range_exit':
+                # CORRECTED: Get position type from strategy configuration (not signal candle analysis)
+                option_type = case_config.get('OptionType', 'CALL').upper()
+                is_call_position = (option_type == 'CALL')
+                
+                # CORRECTED: Use YOUR EXACT SL/TP FORMULAS
+                # Step 1: Calculate signal candle range
+                range_value = signal_high - signal_low
+                
+                # Step 2: Cap the range if needed
+                if range_value > max_sl_points:
+                    range_value = max_sl_points
+                
+                if is_call_position:
+                    # CALL position: Dynamic entry point = highest high
+                    entry_point = signal_high
+                    
+                    # YOUR EXACT SL FORMULA: entry_point - (range_value + buffer_sl_points)
+                    sl_price = entry_point - (range_value + buffer_sl_points)
+                    
+                    # YOUR EXACT TP FORMULA: Risk = range_value + buffer_sl_points, Reward = risk * rr
+                    risk = range_value + buffer_sl_points
+                    reward = risk * reward_ratio
+                    tp_price = entry_point + reward + buffer_tp_points
+                    
+                else:
+                    # PUT position: Dynamic entry point = lowest low
+                    entry_point = signal_low
+                    
+                    # YOUR EXACT SL FORMULA: entry_point + (range_value + buffer_sl_points)
+                    sl_price = entry_point + (range_value + buffer_sl_points)
+                    
+                    # YOUR EXACT TP FORMULA: Risk = range_value + buffer_sl_points, Reward = risk * rr
+                    risk = range_value + buffer_sl_points
+                    reward = risk * reward_ratio
+                    tp_price = entry_point - reward - buffer_tp_points
+                
+                # Enhanced logging for debugging SL/TP integration
+                self.log_detailed(f"SL/TP calculated: Method={sl_tp_method}, OptionType={option_type}, Entry={entry_point:.2f}, SL={sl_price:.2f}, TP={tp_price:.2f}, RR={risk_reward_str}", "DEBUG")
+                
+                # Additional debug information for troubleshooting
+                self.log_detailed(f"SL/TP Signal Candle Details: Open={signal_open:.2f}, High={signal_high:.2f}, Low={signal_low:.2f}, Close={signal_close:.2f}", "DEBUG")
+                self.log_detailed(f"SL/TP Calculation: Max_SL={max_sl_points}, Buffer_SL={buffer_sl_points}, Buffer_TP={buffer_tp_points}", "DEBUG")
+                
+                # Validate calculated values
+                if np.isnan(sl_price) or np.isnan(tp_price):
+                    self.log_detailed(f"WARNING: SL/TP calculation resulted in NaN values - SL={sl_price}, TP={tp_price}", "WARNING")
+                else:
+                    self.log_detailed(f"SUCCESS: SL/TP calculation completed - SL={sl_price:.2f}, TP={tp_price:.2f}", "INFO")
+                
+                return sl_price, tp_price
+            
+            else:
+                # Unsupported method - return NaN values
+                self.log_detailed(f"Unsupported SL_TP_Method: {sl_tp_method}", "WARNING")
+                return np.nan, np.nan
+                
+        except Exception as e:
+            self.log_detailed(f"Error calculating SL/TP levels: {e}", "ERROR")
+            return np.nan, np.nan
+
+    def _calculate_sl_tp_indicator_direct(
+        self,
+        open_data: np.ndarray,
+        high_data: np.ndarray,
+        low_data: np.ndarray,
+        close_data: np.ndarray,
+        entry_signals: np.ndarray,
+        evaluation_index: pd.Index,
+        case_config: Dict[str, Any],
+        entry_condition: str,
+        eval_context: Dict[str, Any]
+    ) -> Dict[str, np.ndarray]:
+        """
+        ULTRA-FAST vectorized SL/TP calculation for all entry signals.
+        
+        This method uses pure NumPy operations to calculate SL/TP values for all entry signals
+        simultaneously, using dynamic entry point detection from actual LTP breakout conditions.
+        
+        Args:
+            open_data: Open prices array
+            high_data: High prices array  
+            low_data: Low prices array
+            close_data: Close prices array
+            entry_signals: Boolean array of entry signals
+            evaluation_index: Index for timestamps
+            case_config: Strategy case configuration containing OptionType
+            entry_condition: Strategy entry condition string for LTP analysis
+            eval_context: Evaluation context containing LTP data
+            
+        Returns:
+            Dictionary with sl_price and tp_price arrays
+        """
+        try:
+            n = len(entry_signals)
+            
+            # Performance timing
+            calc_start = time.time()
+            
+            # Find all entry signal indices
+            entry_indices = np.where(entry_signals)[0]
+            
+            if len(entry_indices) == 0:
+                # No entry signals - return NaN arrays
+                return {
+                    'sl_price': np.full(n, np.nan),
+                    'tp_price': np.full(n, np.nan)
+                }
+            
+            self.log_detailed(f"VECTORIZED SL/TP: Processing {len(entry_indices)} entry signals", "DEBUG")
+            
+            # VECTORIZED CALCULATION: Process all entry signals at once
+            entry_ohlc = np.column_stack([
+                open_data[entry_indices],
+                high_data[entry_indices], 
+                low_data[entry_indices],
+                close_data[entry_indices]
+            ])
+            
+            # Extract actual entry points from LTP breakout conditions
+            entry_points = self._extract_dynamic_entry_points(
+                entry_indices, entry_condition, case_config, eval_context
+            )
+            
+            # Calculate all SL/TP values using dynamic entry points
+            sl_values, tp_values = self._calculate_sl_tp_vectorized(entry_ohlc, case_config, entry_points)
+            
+            # Store calculated values and indices for later population (after position tracking)
+            # Don't populate arrays here - this will be done after position_signals is available
+            calc_time = time.time() - calc_start
+            
+            # Performance logging
+            signals_per_second = len(entry_indices) / calc_time if calc_time > 0 else float('inf')
+            self.log_detailed(f"VECTORIZED SL/TP: {len(entry_indices)} signals calculated in {calc_time:.4f}s ({signals_per_second:.0f} signals/sec)", "INFO")
+            
+            # Return calculated values and metadata for later array population
+            return {
+                'sl_values': sl_values,
+                'tp_values': tp_values,
+                'entry_points': entry_points,
+                'entry_indices': entry_indices,
+                'array_length': n,
+                'needs_population': True  # Flag indicating arrays need to be populated later
+            }
+            
+        except Exception as e:
+            self.log_detailed(f"Error in vectorized SL/TP calculation: {e}", "ERROR")
+            # Return NaN arrays on error
+            return {
+                'sl_price': np.full(len(entry_signals), np.nan),
+                'tp_price': np.full(len(entry_signals), np.nan),
+                'entry_point': np.full(len(entry_signals), np.nan)
+            }
+
+    def get_dynamic_entry_point(
+        self, 
+        eval_context: Dict[str, Any], 
+        candle_index: int, 
+        option_type: str
+    ) -> float:
+        """
+        Dynamically find entry point by scanning ALL numeric values in eval_context.
+        
+        For CALL: Returns maximum numeric value found at candle_index
+        For PUT: Returns minimum numeric value found at candle_index
+        
+        Args:
+            eval_context: Evaluation context containing all market data and indicators
+            candle_index: Index of the candle where entry signal occurred
+            option_type: 'CALL' or 'PUT' to determine max vs min logic
+            
+        Returns:
+            Dynamic entry point value (max for CALL, min for PUT)
+        """
+        try:
+            all_numeric_values = []
+            
+            # Scan EVERY key in eval_context for numeric values
+            for key, data in eval_context.items():
+                try:
+                    # Skip numpy module reference
+                    if key == 'np':
+                        continue
+                        
+                    # Get value at current candle index
+                    if hasattr(data, '__getitem__') and len(data) > candle_index:
+                        value = data[candle_index]
+                    else:
+                        value = data  # Scalar value
+                    
+                    # Collect valid positive numeric values
+                    if isinstance(value, (int, float)) and not np.isnan(value) and value > 0:
+                        all_numeric_values.append(value)
+                        
+                except (IndexError, TypeError, AttributeError, ValueError):
+                    # Skip invalid data
+                    continue
+            
+            # Find max/min based on option type
+            if option_type.upper() == 'CALL':
+                # For CALL: Use the MAXIMUM value found
+                entry_point = max(all_numeric_values) if all_numeric_values else None
+                self.log_detailed(f"CALL dynamic entry point: max of {len(all_numeric_values)} values = {entry_point}", "DEBUG")
+            else:  # PUT
+                # For PUT: Use the MINIMUM value found  
+                entry_point = min(all_numeric_values) if all_numeric_values else None
+                self.log_detailed(f"PUT dynamic entry point: min of {len(all_numeric_values)} values = {entry_point}", "DEBUG")
+            
+            # Fallback to close if no valid values found
+            if entry_point is None:
+                fallback_close = eval_context.get('close')
+                if fallback_close is not None:
+                    if hasattr(fallback_close, '__getitem__'):
+                        entry_point = fallback_close[candle_index]
+                    else:
+                        entry_point = fallback_close
+                else:
+                    entry_point = 0.0  # Last resort fallback
+                self.log_detailed(f"Using fallback entry point: {entry_point}", "WARNING")
+            
+            return float(entry_point)
+            
+        except Exception as e:
+            self.log_detailed(f"Error in dynamic entry point detection: {e}", "ERROR")
+            # Emergency fallback
+            return 0.0
+
+    def _is_indicator_enabled(self, indicator_name: str) -> bool:
+        """
+        Check if a specific indicator is enabled in the configuration.
+        
+        Args:
+            indicator_name: Name of the indicator to check (e.g., 'signal_candle', 'SL_TP_levels')
+            
+        Returns:
+            True if indicator is enabled, False otherwise
+        """
+        try:
+            indicators_config = self.config_loader.main_config.get('indicators', {})
+            indicator_config = indicators_config.get(indicator_name, {})
+            return indicator_config.get('enabled', False)
+        except Exception as e:
+            self.log_detailed(f"Error checking if indicator {indicator_name} is enabled: {e}", "ERROR")
+            return False
+
+    def _extract_dynamic_entry_points(
+        self,
+        entry_indices: np.ndarray,
+        entry_condition: str,
+        case_config: Dict[str, Any],
+        eval_context: Dict[str, Any]
+    ) -> np.ndarray:
+        """
+        Extract actual entry points from LTP breakout conditions.
+        
+        Analyzes the entry condition to identify LTP usage patterns and extracts
+        the actual breakout values where entry conditions were triggered.
+        
+        Args:
+            entry_indices: Indices where entry signals occurred
+            entry_condition: Strategy entry condition string
+            case_config: Strategy case configuration
+            eval_context: Evaluation context containing LTP and market data
+            
+        Returns:
+            Array of actual entry point values for each entry signal
+        """
+        try:
+            option_type = case_config.get('OptionType', 'CALL').upper()
+            
+            # Analyze entry condition to identify LTP breakout pattern
+            if option_type == 'CALL':
+                # CALL strategies use ltp_high breakouts: "(ltp_high > high)"
+                if 'ltp_high' in entry_condition and 'ltp_high > high' in entry_condition:
+                    # Extract actual ltp_high values at entry points
+                    ltp_high_data = eval_context.get('ltp_high')
+                    if ltp_high_data is not None:
+                        if hasattr(ltp_high_data, 'values'):
+                            ltp_values = ltp_high_data.values
+                        else:
+                            ltp_values = ltp_high_data
+                        
+                        # Get the actual ltp_high values where entries occurred
+                        entry_points = ltp_values[entry_indices]
+                        self.log_detailed(f"CALL dynamic entry points: Using ltp_high values, avg={np.mean(entry_points):.2f}", "DEBUG")
+                        return entry_points
+                
+                # Fallback: use signal candle high if LTP not available
+                high_data = eval_context.get('high')
+                if high_data is not None:
+                    if hasattr(high_data, 'values'):
+                        high_values = high_data.values
+                    else:
+                        high_values = high_data
+                    entry_points = high_values[entry_indices]
+                    self.log_detailed(f"CALL fallback entry points: Using signal high values", "WARNING")
+                    return entry_points
+                    
+            else:  # PUT
+                # PUT strategies use ltp_low breakdowns: "(ltp_low < low)"
+                if 'ltp_low' in entry_condition and 'ltp_low < low' in entry_condition:
+                    # Extract actual ltp_low values at entry points
+                    ltp_low_data = eval_context.get('ltp_low')
+                    if ltp_low_data is not None:
+                        if hasattr(ltp_low_data, 'values'):
+                            ltp_values = ltp_low_data.values
+                        else:
+                            ltp_values = ltp_low_data
+                        
+                        # Get the actual ltp_low values where entries occurred
+                        entry_points = ltp_values[entry_indices]
+                        self.log_detailed(f"PUT dynamic entry points: Using ltp_low values, avg={np.mean(entry_points):.2f}", "DEBUG")
+                        return entry_points
+                
+                # Fallback: use signal candle low if LTP not available
+                low_data = eval_context.get('low')
+                if low_data is not None:
+                    if hasattr(low_data, 'values'):
+                        low_values = low_data.values
+                    else:
+                        low_values = low_data
+                    entry_points = low_values[entry_indices]
+                    self.log_detailed(f"PUT fallback entry points: Using signal low values", "WARNING")
+                    return entry_points
+            
+            # Last resort fallback: use close prices
+            close_data = eval_context.get('close')
+            if close_data is not None:
+                if hasattr(close_data, 'values'):
+                    close_values = close_data.values
+                else:
+                    close_values = close_data
+                entry_points = close_values[entry_indices]
+                self.log_detailed(f"Emergency fallback entry points: Using close values", "ERROR")
+                return entry_points
+            
+            # If all else fails, return zeros
+            self.log_detailed(f"ERROR: No market data available for entry point extraction", "ERROR")
+            return np.zeros(len(entry_indices))
+            
+        except Exception as e:
+            self.log_detailed(f"Error extracting dynamic entry points: {e}", "ERROR")
+            # Return zeros as fallback
+            return np.zeros(len(entry_indices))
+
+    def _calculate_sl_tp_vectorized(self, entry_ohlc: np.ndarray, case_config: Dict[str, Any], entry_points: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Ultra-fast vectorized SL/TP calculation using strategy configuration and dynamic entry points.
+        
+        Implements corrected SL/TP calculation logic:
+        1. Position type from strategy OptionType (not signal candle analysis)
+        2. Dynamic entry point from actual LTP breakout values
+        3. Buffer points and proper risk-reward calculations
+        
+        Args:
+            entry_ohlc: 2D array of shape (n_entries, 4) containing [open, high, low, close]
+            case_config: Strategy case configuration containing OptionType
+            entry_points: Array of actual entry point values from LTP breakout detection
+            
+        Returns:
+            Tuple of (sl_values, tp_values) arrays
+        """
+        try:
+            # Get configuration
+            sl_tp_config = self.config_loader.main_config.get('indicators', {}).get('SL_TP_levels', {})
+            max_sl_points = float(sl_tp_config.get('Max_Sl_points', 60))
+            buffer_sl_points = float(sl_tp_config.get('buffer_sl_points', 5))
+            buffer_tp_points = float(sl_tp_config.get('buffer_tp_points', 3))
+            risk_reward_str = sl_tp_config.get('RiskRewardRatio', '1:2')
+            
+            # Parse risk-reward ratio
+            risk_part, reward_part = risk_reward_str.split(':')
+            risk_ratio = float(risk_part)
+            reward_ratio = float(reward_part)
+            
+            # Extract OHLC components
+            signal_open = entry_ohlc[:, 0]
+            signal_high = entry_ohlc[:, 1]
+            signal_low = entry_ohlc[:, 2]
+            signal_close = entry_ohlc[:, 3]
+            
+            # CORRECTED: Get position type from strategy configuration (not signal candle analysis)
+            option_type = case_config.get('OptionType', 'CALL').upper()
+            is_call_position = (option_type == 'CALL')
+            
+            # DEBUG: Log input data
+            print(f"🎯 EXECUTING: _calculate_sl_tp_vectorized (CORRECT METHOD)")
+            print(f"🔍 DEBUG SL/TP CALCULATION:")
+            print(f"   Strategy: {case_config.get('case_name', 'Unknown')}")
+            print(f"   OptionType: {option_type}")
+            print(f"   Signal OHLC: O={signal_open[0]:.2f}, H={signal_high[0]:.2f}, L={signal_low[0]:.2f}, C={signal_close[0]:.2f}")
+            print(f"   Entry Points Available: {entry_points is not None}")
+            if entry_points is not None:
+                print(f"   Entry Point Value: {entry_points[0]:.2f}")
+            print(f"   Config: Max_SL={max_sl_points}, Buffer_SL={buffer_sl_points}, Buffer_TP={buffer_tp_points}, RR={risk_reward_str}")
+            
+            # Use dynamic entry points or fallback to signal candle data
+            if entry_points is not None and len(entry_points) == len(signal_close):
+                # Use actual LTP breakout values as entry points
+                entry_point_values = entry_points
+                print(f"   ✅ Using dynamic entry points from LTP breakout detection: {entry_point_values[0]:.2f}")
+                self.log_detailed(f"Using dynamic entry points from LTP breakout detection", "INFO")
+            else:
+                # Fallback to signal candle data (old behavior)
+                if is_call_position:
+                    entry_point_values = signal_high
+                else:
+                    entry_point_values = signal_low
+                print(f"   ⚠️ Fallback: Using signal candle data for entry points: {entry_point_values[0]:.2f}")
+                self.log_detailed(f"Fallback: Using signal candle data for entry points", "WARNING")
+            
+            # YOUR EXACT FORMULAS: Calculate signal candle range for each entry
+            range_values = signal_high - signal_low
+            print(f"   Range Calculation: {signal_high[0]:.2f} - {signal_low[0]:.2f} = {range_values[0]:.2f}")
+            
+            # Cap each range to max_sl_points
+            range_values_before_cap = range_values.copy()
+            range_values = np.minimum(range_values, max_sl_points)
+            print(f"   Range After Max Cap: {range_values_before_cap[0]:.2f} -> {range_values[0]:.2f} (max: {max_sl_points})")
+            
+            # Initialize arrays
+            sl_values = np.zeros_like(signal_close)
+            tp_values = np.zeros_like(signal_close)
+            
+            if is_call_position:
+                # CALL POSITION LOGIC
+                # Dynamic entry point from actual LTP breakout
+                entry_point = entry_point_values
+                
+                # YOUR EXACT SL FORMULA: entry_point - (range_value + buffer_sl_points)
+                sl_values = entry_point - (range_values + buffer_sl_points)
+                
+                # YOUR EXACT TP FORMULA: Risk = range_value + buffer_sl_points, Reward = risk * rr
+                risk = range_values + buffer_sl_points
+                reward = risk * reward_ratio
+                tp_values = entry_point + reward + buffer_tp_points
+                
+                print(f"   CALL Calculation:")
+                print(f"     SL = {entry_point[0]:.2f} - ({range_values[0]:.2f} + {buffer_sl_points}) = {sl_values[0]:.2f}")
+                print(f"     Risk = {range_values[0]:.2f} + {buffer_sl_points} = {risk[0]:.2f}")
+                print(f"     Reward = {risk[0]:.2f} × {reward_ratio} = {reward[0]:.2f}")
+                print(f"     TP = {entry_point[0]:.2f} + {reward[0]:.2f} + {buffer_tp_points} = {tp_values[0]:.2f}")
+                
+                self.log_detailed(f"CALL position SL/TP: Entry={np.mean(entry_point):.2f}, Range={np.mean(range_values):.2f}, Risk={np.mean(risk):.2f}, Reward={np.mean(reward):.2f}", "DEBUG")
+                
+            else:
+                # PUT POSITION LOGIC  
+                # Dynamic entry point from actual LTP breakout
+                entry_point = entry_point_values
+                
+                # YOUR EXACT SL FORMULA: entry_point + (range_value + buffer_sl_points)
+                sl_values = entry_point + (range_values + buffer_sl_points)
+                
+                # YOUR EXACT TP FORMULA: Risk = range_value + buffer_sl_points, Reward = risk * rr
+                risk = range_values + buffer_sl_points
+                reward = risk * reward_ratio
+                tp_values = entry_point - reward - buffer_tp_points
+                
+                print(f"   PUT Calculation:")
+                print(f"     SL = {entry_point[0]:.2f} + ({range_values[0]:.2f} + {buffer_sl_points}) = {sl_values[0]:.2f}")
+                print(f"     Risk = {range_values[0]:.2f} + {buffer_sl_points} = {risk[0]:.2f}")
+                print(f"     Reward = {risk[0]:.2f} × {reward_ratio} = {reward[0]:.2f}")
+                print(f"     TP = {entry_point[0]:.2f} - {reward[0]:.2f} - {buffer_tp_points} = {tp_values[0]:.2f}")
+                
+                self.log_detailed(f"PUT position SL/TP: Entry={np.mean(entry_point):.2f}, Range={np.mean(range_values):.2f}, Risk={np.mean(risk):.2f}, Reward={np.mean(reward):.2f}", "DEBUG")
+            
+            print(f"   FINAL RESULT: SL={sl_values[0]:.2f}, TP={tp_values[0]:.2f}")
+            
+            # Log calculation details
+            self.log_detailed(f"SL/TP Configuration: OptionType={option_type}, Max_SL={max_sl_points}, Buffer_SL={buffer_sl_points}, Buffer_TP={buffer_tp_points}, RR={risk_reward_str}", "INFO")
+            
+            return sl_values, tp_values
+            
+        except Exception as e:
+            self.log_detailed(f"Error in vectorized SL/TP calculation core: {e}", "ERROR")
+            print(f"❌ ERROR in SL/TP calculation: {e}")
+            # Return NaN arrays on error
+            n_entries = len(entry_ohlc)
+            return np.full(n_entries, np.nan), np.full(n_entries, np.nan)
+
+    def _populate_sl_tp_arrays_vectorized(
+        self, 
+        n: int, 
+        entry_indices: np.ndarray, 
+        sl_values: np.ndarray, 
+        tp_values: np.ndarray,
+        entry_points: np.ndarray = None,
+        position_signals: np.ndarray = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Efficiently populate SL/TP arrays using vectorized operations with proper exit detection.
+        
+        Uses same logic as signal candle population to ensure SL/TP values stay constant
+        during position lifetime (entry -> exit) and don't overwrite each other.
+        
+        Args:
+            n: Total array length
+            entry_indices: Indices where entries occur  
+            sl_values: Calculated SL values for each entry
+            tp_values: Calculated TP values for each entry
+            entry_points: Entry point values for each entry (optional)
+            position_signals: Position signals array (1=entry, -1=exit, 0=hold) for exit detection
+            
+        Returns:
+            Tuple of populated (sl_prices, tp_prices, entry_point_array) arrays
+        """
+        try:
+            # Initialize with NaN
+            sl_prices = np.full(n, np.nan)
+            tp_prices = np.full(n, np.nan)
+            entry_point_array = np.full(n, np.nan)
+            
+            # IMPROVED: Use exit detection like signal candle logic
+            if position_signals is not None:
+                print(f"🔧 Using position_signals for proper entry-exit pair detection")
+                
+                # Find entry and exit positions (same logic as signal candle)
+                entry_positions = np.where(position_signals == 1)[0]
+                exit_positions = np.where(position_signals == -1)[0]
+                
+                # Process each entry-exit pair
+                for i, entry_idx in enumerate(entry_positions):
+                    # Find the corresponding exit for this entry
+                    corresponding_exits = exit_positions[exit_positions > entry_idx]
+                    if len(corresponding_exits) > 0:
+                        exit_idx = corresponding_exits[0]
+                    else:
+                        exit_idx = n  # Position held until end
+                    
+                    # Set SL/TP/entry_point for SPECIFIC POSITION DURATION (like signal candle)
+                    if i < len(sl_values):
+                        print(f"       🔧 Setting SL: sl_prices[{entry_idx}:{exit_idx}] = {sl_values[i]:.2f}")
+                        sl_prices[entry_idx:exit_idx] = sl_values[i]
+                        print(f"       🔧 Setting TP: tp_prices[{entry_idx}:{exit_idx}] = {tp_values[i]:.2f}")
+                        tp_prices[entry_idx:exit_idx] = tp_values[i]
+                        
+                        # Immediate debug: Check if values were actually set
+                        sl_test = np.sum(~np.isnan(sl_prices))
+                        tp_test = np.sum(~np.isnan(tp_prices))
+                        print(f"       ✅ IMMEDIATE CHECK: SL valid {sl_test}, TP valid {tp_test}")
+                    
+                    # Set entry points for position duration
+                    if entry_points is not None and i < len(entry_points):
+                        print(f"       🔧 Setting entry_point: entry_point_array[{entry_idx}:{exit_idx}] = {entry_points[i]:.2f}")
+                        entry_point_array[entry_idx:exit_idx] = entry_points[i]
+                    
+                    duration = exit_idx - entry_idx
+                    print(f"   📊 SL/TP populated: Entry at {entry_idx}, Exit at {exit_idx}, Duration {duration} candles")
+                    entry_point_display = entry_points[i] if entry_points is not None and i < len(entry_points) else "N/A"
+                    print(f"       SL={sl_values[i]:.2f}, TP={tp_values[i]:.2f}, Entry_Point={entry_point_display}")
+                    
+                    # Debug: Check if values were actually set
+                    actual_sl_set = np.sum(~np.isnan(sl_prices))
+                    actual_tp_set = np.sum(~np.isnan(tp_prices))
+                    actual_entry_set = np.sum(~np.isnan(entry_point_array))
+                    print(f"       🔍 After setting: SL valid {actual_sl_set}, TP valid {actual_tp_set}, Entry valid {actual_entry_set}")
+                
+            else:
+                # FALLBACK: Old behavior (will still cause overwriting)
+                print(f"⚠️ WARNING: No position_signals provided - using old logic (may cause entry_point overwriting)")
+                for i, entry_idx in enumerate(entry_indices):
+                    # Set SL/TP from entry point onwards (OLD BEHAVIOR - PROBLEMATIC)
+                    sl_prices[entry_idx:] = sl_values[i]
+                    tp_prices[entry_idx:] = tp_values[i]
+                    
+                    # Set entry points if provided
+                    if entry_points is not None and len(entry_points) > i:
+                        entry_point_array[entry_idx:] = entry_points[i]
+            
+            return sl_prices, tp_prices, entry_point_array
+            
+        except Exception as e:
+            self.log_detailed(f"Error in SL/TP array population: {e}", "ERROR")
+            print(f"❌ EXCEPTION in _populate_sl_tp_arrays_vectorized: {e}")
+            import traceback
+            traceback.print_exc()
+            return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+
+    def _is_debug_export_enabled(self) -> bool:
+        """
+        Check if debug CSV export is enabled in configuration.
+        
+        Returns:
+            True if debug export is enabled, False otherwise
+        """
+        try:
+            sl_tp_config = self.config_loader.main_config.get('indicators', {}).get('SL_TP_levels', {})
+            return sl_tp_config.get('debug_export_enabled', False)
+        except Exception as e:
+            self.log_detailed(f"Error checking debug export config: {e}", "WARNING")
+            return False
+
+    def _export_eval_context_debug_csv(
+        self,
+        eval_context: Dict[str, Any],
+        evaluation_index: pd.Index,
+        stage: str,
+        group_name: str = "",
+        case_name: str = ""
+    ) -> str:
+        """
+        Export eval_context to CSV for debugging SL/TP integration issues.
+        
+        This function creates a comprehensive CSV file showing all eval_context data
+        including market data, indicators, signal candle values, and SL/TP levels
+        to help debug why SL/TP exit conditions are not working.
+        
+        Args:
+            eval_context: The evaluation context dictionary
+            evaluation_index: Index for timestamps
+            stage: Stage identifier (e.g., "before_sl_tp", "after_sl_tp", "during_exit")
+            group_name: Strategy group name for filename
+            case_name: Strategy case name for filename
+            
+        Returns:
+            Path to the created CSV file
+        """
+        try:
+            import os
+            from datetime import datetime
+            
+            # Create debug directory if it doesn't exist
+            debug_dir = "E:Projects//vAlgo//output//debug_output"
+            os.makedirs(debug_dir, exist_ok=True)
+
+            debug_dir = Path("E:"/"Projects") / "vAlgo" / "output" / "debug_output"
+            debug_dir.mkdir(parents=True, exist_ok=True) 
+            
+            # Create timestamp for unique filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"eval_context_debug_{stage}_{group_name}_{case_name}_{timestamp}.csv"
+            filepath = os.path.join(debug_dir, filename)
+            
+            # Prepare data for CSV export
+            data_dict = {}
+            
+            # Add timestamp index
+            if isinstance(evaluation_index, pd.Index):
+                data_dict['timestamp'] = evaluation_index
+            else:
+                data_dict['timestamp'] = range(len(evaluation_index))
+            
+            # Add all eval_context data with proper handling of different data types
+            for key, value in eval_context.items():
+                if key == 'np':  # Skip numpy module
+                    continue
+                    
+                try:
+                    if hasattr(value, '__len__') and not isinstance(value, str):
+                        if hasattr(value, 'values'):  # pandas Series
+                            data_dict[key] = value.values
+                        elif isinstance(value, np.ndarray):  # numpy array
+                            data_dict[key] = value
+                        elif isinstance(value, list):  # list
+                            data_dict[key] = np.array(value)
+                        else:
+                            # Try to convert to array
+                            data_dict[key] = np.array(value)
+                    else:
+                        # Scalar value - repeat for all rows
+                        data_dict[key] = np.full(len(data_dict['timestamp']), value)
+                        
+                except Exception as e:
+                    self.log_detailed(f"Error processing eval_context key '{key}': {e}", "WARNING")
+                    # Add placeholder for failed keys
+                    data_dict[key] = np.full(len(data_dict['timestamp']), np.nan)
+            
+            # Create DataFrame from data_dict
+            df = pd.DataFrame(data_dict)
+            
+            # Add debug metadata columns
+            df['debug_stage'] = stage
+            df['debug_group'] = group_name
+            df['debug_case'] = case_name
+            df['debug_timestamp'] = timestamp
+            
+            # Special focus on SL/TP and entry_point columns - add validation flags
+            if 'sl_price' in df.columns:
+                df['sl_price_is_nan'] = df['sl_price'].isna()
+                df['sl_price_valid_count'] = (~df['sl_price'].isna()).cumsum()
+                
+            if 'tp_price' in df.columns:
+                df['tp_price_is_nan'] = df['tp_price'].isna()
+                df['tp_price_valid_count'] = (~df['tp_price'].isna()).cumsum()
+            
+            if 'entry_point' in df.columns:
+                df['entry_point_is_nan'] = df['entry_point'].isna()
+                df['entry_point_valid_count'] = (~df['entry_point'].isna()).cumsum()
+            
+            # Add position tracking info if available
+            if 'close' in df.columns:
+                df['close_price'] = df['close']
+                
+            # Export to CSV
+            df.to_csv(filepath, index=False)
+            print(f"report export: {filepath}")
+            
+            # Log summary information
+            total_rows = len(df)
+            sl_valid = (~df['sl_price'].isna()).sum() if 'sl_price' in df.columns else 0
+            tp_valid = (~df['tp_price'].isna()).sum() if 'tp_price' in df.columns else 0
+            
+            self.log_detailed(
+                f"DEBUG CSV exported: {filename} | "
+                f"Rows: {total_rows} | "
+                f"SL valid: {sl_valid}/{total_rows} | "
+                f"TP valid: {tp_valid}/{total_rows} | "
+                f"Columns: {len(df.columns)}", "INFO"
+            )
+            
+            print(f"🔍 DEBUG: Eval context exported to {filepath}")
+            print(f"   📊 Stage: {stage} | Rows: {total_rows} | Columns: {len(df.columns)}")
+            print(f"   🎯 SL/TP status: SL valid {sl_valid}/{total_rows}, TP valid {tp_valid}/{total_rows}")
+            
+            return filepath
+            
+        except Exception as e:
+            self.log_detailed(f"Error exporting eval_context debug CSV: {e}", "ERROR")
+            print(f"❌ Failed to export debug CSV: {e}")
+            return ""
+
 
 # Convenience function for external use
 def create_vectorbt_signal_generator(config_loader, data_loader, logger) -> VectorBTSignalGenerator:
@@ -2263,26 +2745,10 @@ if __name__ == "__main__":
         # Create components
         config_loader = JSONConfigLoader()
         data_loader = EfficientDataLoader(config_loader)
+
+       
         
-        # Create fallback logger
-        class TestLogger:
-            def log_major_component(self, msg, comp): print(f"🚀 {comp}: {msg}")
-            def log_detailed(self, msg, level, comp): print(f"DEBUG {comp}: {msg}")
-            def log_performance(self, metrics, comp): print(f"📊 {comp}: {metrics}")
-        
-        logger = TestLogger()
-        
-        # Create signal generator
-        generator = VectorBTSignalGenerator(config_loader, data_loader, logger)
-        
-        print(f"VectorBT Signal Generator test completed!")
-        print(f"   📊 Performance: {generator.get_performance_summary()}")
-        
-        # Test multi-timeframe validation if enabled
-        print("\n🔍 Testing Multi-Timeframe Validation...")
-        validation_result = generator.validate_multi_timeframe_implementation()
-        print(f"   📋 Validation Result: {validation_result}")
-        
+       
     except Exception as e:
         print(f"VectorBT Signal Generator test failed: {e}")
         sys.exit(1)

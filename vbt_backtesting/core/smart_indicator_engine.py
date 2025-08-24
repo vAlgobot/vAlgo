@@ -983,6 +983,56 @@ class SmartIndicatorEngine:
         except Exception as e:
             raise ConfigurationError(f"Signal candle calculation failed: {e}")
     
+    def _calculate_sl_price(self, close: np.ndarray) -> pd.Series:
+        """
+        Calculate Stop Loss price levels that persist during position lifecycle.
+        
+        Stop Loss levels are calculated when entry condition becomes True
+        and maintained until exit condition becomes True.
+        Uses signal candle range with risk-reward ratio from SL_TP_levels config.
+        
+        Args:
+            close: Close price array (required for interface compatibility)
+            
+        Returns:
+            None - Actual calculation handled by VectorBT Signal Generator during position lifecycle
+            
+        Note:
+            Similar to signal_candle, this indicator is calculated at runtime
+            during the position lifecycle within the VectorBT Signal Generator.
+        """
+        print("📊 SL Price Calculation: Runtime indicator using SL_TP_levels config")
+        print("   🔄 Values calculated at entry, persist until exit, then reset")
+        
+        # Return None to indicate this is handled by VectorBT Signal Generator
+        # Similar to how signal_candle works - actual calculation happens at runtime
+        return None
+    
+    def _calculate_tp_price(self, close: np.ndarray) -> pd.Series:
+        """
+        Calculate Take Profit price levels that persist during position lifecycle.
+        
+        Take Profit levels are calculated when entry condition becomes True
+        and maintained until exit condition becomes True.
+        Uses signal candle range with risk-reward ratio from SL_TP_levels config.
+        
+        Args:
+            close: Close price array (required for interface compatibility)
+            
+        Returns:
+            None - Actual calculation handled by VectorBT Signal Generator during position lifecycle
+            
+        Note:
+            Similar to signal_candle, this indicator is calculated at runtime
+            during the position lifecycle within the VectorBT Signal Generator.
+        """
+        print("📊 TP Price Calculation: Runtime indicator using SL_TP_levels config")
+        print("   🔄 Values calculated at entry, persist until exit, then reset")
+        
+        # Return None to indicate this is handled by VectorBT Signal Generator
+        # Similar to how signal_candle works - actual calculation happens at runtime
+        return None
+    
     # =============================================================================
     # Internal Helper Methods
     # =============================================================================
@@ -1035,7 +1085,9 @@ class SmartIndicatorEngine:
             'ema': self._talib_ema_apply_func,
             'cpr': self._calculate_cpr_numpy_batch,
             'previous_candle_ohlc': self._calculate_previous_candle_ohlc,
-            'signal_candle': self._calculate_signal_candle
+            'signal_candle': self._calculate_signal_candle,
+            'sl_price': self._calculate_sl_price,
+            'tp_price': self._calculate_tp_price
         }
         
         return indicator_mappings
@@ -1126,6 +1178,18 @@ class SmartIndicatorEngine:
         # SKIP SIGNAL CANDLE INDICATORS - handled exclusively by VectorBT Signal Generator
         if indicator_name.startswith('signal_candle_'):
             # Skip calculation entirely - signal candle data provided by VectorBT Signal Generator
+            # Don't create any columns to avoid duplicates in results compilation
+            return None  # Signal to caller that this indicator is handled elsewhere
+        
+        # SKIP SL_TP_LEVELS CONFIGURATION INDICATOR - config-only, not calculable
+        if indicator_name == 'SL_TP_levels':
+            # Skip calculation entirely - this is config-only for sl_price/tp_price parameters
+            print("📊 SL_TP_levels: Configuration-only indicator (provides parameters for sl_price/tp_price)")
+            return None  # Signal to caller that this is handled elsewhere
+        
+        # SPECIAL HANDLING FOR SL_TP SUB-INDICATORS
+        if indicator_name.startswith('sl_') or indicator_name.startswith('tp_'):
+            # Skip calculation entirely - SL/TP levels provided by VectorBT Signal Generator
             # Don't create any columns to avoid duplicates in results compilation
             return None  # Signal to caller that this indicator is handled elsewhere
         

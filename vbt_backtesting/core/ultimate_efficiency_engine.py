@@ -346,17 +346,19 @@ class UltimateEfficiencyEngine:
             )
             self.performance_stats['signal_generation_time'] = time.time() - signal_start
             
-            # Extract signals, merged_data, and signal_candle_data from the result
+            # Extract signals, merged_data, signal_candle_data, and sl_tp_data from the result
             if isinstance(signal_generation_result, dict) and 'signals' in signal_generation_result:
                 # New format with merged_data support
                 vectorbt_signals = signal_generation_result['signals']
                 merged_data_for_reports = signal_generation_result.get('merged_data')
                 signal_candle_data = signal_generation_result.get('signal_candle_data', {})
+                sl_tp_data = signal_generation_result.get('sl_tp_data', {})
             else:
                 # Backward compatibility - old format (direct signals dictionary)
                 vectorbt_signals = signal_generation_result
                 merged_data_for_reports = None
                 signal_candle_data = {}
+                sl_tp_data = {}
             
             # Phase 4: Entry/Exit Signal Extraction (Modular) - using filtered data
             extraction_start = time.time()
@@ -433,7 +435,7 @@ class UltimateEfficiencyEngine:
             # Phase 6: Results Compilation (Modular) - using reporting data
             compile_start = time.time()
             results = self.results_compiler.compile_results(
-                reporting_market_data, reporting_indicators, trade_signals, options_pnl, signal_candle_data
+                reporting_market_data, reporting_indicators, trade_signals, options_pnl, signal_candle_data, sl_tp_data
             )
             self.performance_stats['results_compilation_time'] = time.time() - compile_start
             

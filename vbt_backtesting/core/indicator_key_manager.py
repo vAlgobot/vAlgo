@@ -391,6 +391,15 @@ class IndicatorKeyManager:
                 "signal_candle_range_exit": "(close < signal_candle_low) | (close > signal_candle_high)"
             })
         
+        # Add SL/TP examples if sl_price and tp_price keys are available
+        has_sl_tp_keys = 'sl_price' in indicator_keys and 'tp_price' in indicator_keys
+        if has_sl_tp_keys:
+            examples.update({
+                "sl_tp_exit": "(ltp_close <= sl_price) | (ltp_high >= tp_price)",
+                "stop_loss_only": "ltp_close <= sl_price",
+                "take_profit_only": "ltp_high >= tp_price"
+            })
+        
         return examples
     
     def validate_strategies_against_indicators(self, force_validation: bool = False) -> Dict[str, Any]:

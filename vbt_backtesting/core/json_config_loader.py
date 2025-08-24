@@ -263,6 +263,14 @@ class JSONConfigLoader:
                     ]
                     for signal_indicator in signal_candle_indicators:
                         indicator_keys[signal_indicator] = f"Signal candle {signal_indicator.replace('signal_candle_', '').upper()} - captured at entry, persistent until exit"
+                elif indicator_name == 'SL_TP_levels':
+                    # SL_TP_levels generates 2 sub-indicators (like signal_candle pattern)
+                    sl_tp_indicators = ['sl_price', 'tp_price']
+                    for sl_tp_indicator in sl_tp_indicators:
+                        if sl_tp_indicator == 'sl_price':
+                            indicator_keys[sl_tp_indicator] = "Stop Loss price - calculated at entry using signal candle range, persistent until exit"
+                        elif sl_tp_indicator == 'tp_price':
+                            indicator_keys[sl_tp_indicator] = "Take Profit price - calculated at entry using signal candle range, persistent until exit"
                 else:
                     # Single indicators (VWAP, Bollinger Bands, etc.)
                     indicator_keys[indicator_name] = f"{indicator_name.upper()} indicator"

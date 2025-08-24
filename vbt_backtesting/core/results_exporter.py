@@ -521,6 +521,10 @@ class ResultsExporter(ProcessorBase):
                 # Previous data
                 'previous_day_high', 'previous_day_low', 'previous_day_close',
                 'previous_candle_open', 'previous_candle_high', 'previous_candle_low', 'previous_candle_close',
+                # Signal candle data (runtime indicators)
+                'signal_candle_open', 'signal_candle_high', 'signal_candle_low', 'signal_candle_close',
+                # SL/TP levels (runtime indicators)
+                'sl_price', 'tp_price',
                 # Signal columns
                 'Entry_Signal', 'Exit_Signal', 'Strategy_Signals', 'Strategy_Signal_Text', 'Signal_Adjusted_Timestamp',
                 # Strategy information
