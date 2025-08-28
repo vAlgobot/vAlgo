@@ -19,11 +19,11 @@
     "timeframe": "5m",
     "lot_size": 75,
     "initial_capital": 100000,
-    "commission_per_trade": 0,
+    "commission_per_trade": 40,
     "slippage_percentage": 0
   },
   "database": {
-    "path": "data/vAlgo_market_data.db",
+    "path": "data/valgo_market_data.db",
     "type": "duckdb",
     "required_tables": ["ohlcv_data", "nifty_expired_option_chain"],
     "validate_on_startup": true
@@ -32,12 +32,12 @@
     "strike_type": "ATM", 
     "default_option_type": "CALL",
     "expiry_selection": "weekly",
-    "max_positions_per_strategy": 1,
+    "max_positions_per_strategy": 3,
     "enable_real_money_integration": true,
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2025-06-01",
+    "start_date": "2024-03-01",
     "end_date": "2025-06-30", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,

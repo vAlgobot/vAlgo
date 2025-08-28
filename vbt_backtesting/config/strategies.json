@@ -38,7 +38,7 @@
         "priority": 1,
         "description": "CPR & SMA strategy",
         "entry": "(close > previous_day_high) & (close > cpr_r1) & (close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (previous_candle_close > previous_candle_open) & (close > previous_candle_high) & (close > open)",
-        "exit": "(ltp_low < sl_price) | (ltp_high > tp_price)",
+        "exit": "(ltp_low < sl_price) | (close < ema_20)",
         "OptionType": "CALL",
         "StrikeType": "ATM",
         "position_size": "1"
@@ -49,13 +49,40 @@
         "priority": 1,
         "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
         "entry": "(close < previous_day_low) &  (close < cpr_s1) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (previous_candle_close < previous_candle_open) & (close < previous_candle_low) & (close < open)",
-        "exit": "(ltp_high > sl_price) | (ltp_low < tp_price)",
+        "exit": "(ltp_high > sl_price) | (close > ema_20)",
         "OptionType": "PUT",
         "StrikeType": "ATM",
         "position_size": "1"
       }
     }
   },
+  "EMA_TrendFollow_PDH_PDL": {
+    "status": "InActive",
+    "description": "Trend following strategies with moving average analysis",
+    "max_concurrent_cases": 1,
+    "cases": {
+      "CPR_EMA_CALL_PDH": {
+        "status": "Active",
+        "priority": 1,
+        "description": "CPR & SMA strategy",
+        "entry": "(close > previous_day_high) & (close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (previous_candle_close > previous_candle_open) & (close > previous_candle_high) & (close > open)",
+        "exit": "(ltp_low < sl_price) | (close < ema_20)",
+        "OptionType": "CALL",
+        "StrikeType": "ATM",
+        "position_size": "1"
+        
+      },
+      "CPR_EMA_PUT_PDL": {
+        "status": "Active",
+        "priority": 1,
+        "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
+        "entry": "(close < previous_day_low) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (previous_candle_close < previous_candle_open) & (close < previous_candle_low) & (close < open)",
+        "exit": "(ltp_high > sl_price) | (close > ema_20)",
+        "OptionType": "PUT",
+        "StrikeType": "ATM",
+        "position_size": "1"
+      }
+    },
   "RSI_Reversal": {
     "status": "InActive", 
     "description": "Mean reversion strategies using RSI and moving averages",
@@ -80,30 +107,6 @@
         "StrikeType": "ATM"
       }
     }
-  },
-  "Breakout": {
-    "status": "InActive",
-    "description": "Breakout strategies using VWAP and momentum",
-    "max_concurrent_cases": 1,
-    "cases": {
-      "VWAP_Breakout_Call": {
-        "status": "Active",
-        "priority": 1,
-        "description": "Price breaks above VWAP, with momentum",
-        "entry": "(close > ema_20) & (ema_50 > ema_200)",
-        "exit": "close < ema_10",
-        "OptionType": "CALL",
-        "StrikeType": "ATM"
-      },
-      "VWAP_Breakdown_Put": {
-        "status": "Active",
-        "priority": 1,
-        "description": "Price breaks below VWAP, with weakness",
-        "entry": "(close < ema_20) & (ema_50 < ema_200)",
-        "exit": "close > ema_10",
-        "OptionType": "PUT",
-        "StrikeType": "ATM"
-      }
-    }
   }
+}
 }

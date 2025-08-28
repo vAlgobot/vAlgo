@@ -685,86 +685,30 @@ class VectorBTSignalGenerator(ProcessorBase):
                 if self._is_debug_export_enabled():
                     self._export_eval_context_debug_csv(eval_context, evaluation_index, "before_position_tracking", group_name, case_name)
             
-            # CRITICAL FIX: Pre-populate SL/TP arrays BEFORE exit condition evaluation
+            # SKIP PRE-POPULATION: Let SL/TP values be populated AFTER position tracking
             uses_sl_price = 'sl_price' in exit_condition
             uses_tp_price = 'tp_price' in exit_condition
             
             if uses_sl_price or uses_tp_price:
-                print(f"🔧 CRITICAL FIX: Pre-populating SL/TP arrays for {group_name}.{case_name} before exit evaluation")
+                print(f"🔧 FIXED: SL/TP arrays will be populated AFTER position tracking for {group_name}.{case_name}")
                 
-                # Check if we have SL/TP calculation data that needs to be populated
+                # Verify we have calculation data available
                 if '_sl_tp_calc_data' in eval_context:
                     sl_tp_calc_data = eval_context['_sl_tp_calc_data']
-                    
                     if sl_tp_calc_data.get('needs_population', False):
-                        print(f"   🔧 PRE-POPULATING SL/TP arrays from calculated data")
-                        
-                        # Get entry indices and calculated values
-                        entry_indices = sl_tp_calc_data['entry_indices']
-                        sl_values = sl_tp_calc_data['sl_values']
-                        tp_values = sl_tp_calc_data['tp_values']
-                        entry_points = sl_tp_calc_data.get('entry_points')
-                        array_length = sl_tp_calc_data['array_length']
-                        
-                        if len(entry_indices) > 0 and len(sl_values) > 0 and len(tp_values) > 0:
-                            # Create temporary position tracking to get proper entry-exit pairs
-                            temp_entry_signals = pd.Series(False, index=evaluation_index)
-                            temp_entry_signals.iloc[entry_indices] = True
-                            
-                            # Apply basic position tracking to get entry-exit pairs
-                            trading_hours_mask, forced_exit_mask = create_time_masks(evaluation_index, self.config_loader)
-                            
-                            # Extract indicator timestamps for blacklist tracking
-                            indicator_timestamps = None
-                            if merged_data is not None and 'Indicator_Timestamp' in merged_data.columns:
-                                indicator_timestamps = merged_data['Indicator_Timestamp'].values
-                            elif 'Indicator_Timestamp' in eval_context:
-                                indicator_timestamps = eval_context['Indicator_Timestamp'].values if hasattr(eval_context['Indicator_Timestamp'], 'values') else eval_context['Indicator_Timestamp']
-                            
-                            temp_position_signals = vectorized_position_tracking(
-                                temp_entry_signals.values,
-                                np.zeros(len(temp_entry_signals), dtype=bool),  # No exits yet, just entry tracking
-                                trading_hours_mask,
-                                forced_exit_mask,
-                                indicator_timestamps  # NEW: Pass indicator timestamps for validation
-                            )
-                            
-                            # Find actual entry positions
-                            actual_entry_positions = np.where(temp_position_signals == 1)[0]
-                            
-                            if len(actual_entry_positions) > 0:
-                                # Populate SL/TP arrays for the position duration
-                                sl_prices, tp_prices, entry_point_array = self._populate_sl_tp_arrays_vectorized(
-                                    array_length,
-                                    actual_entry_positions[:len(sl_values)],  # Match array sizes
-                                    sl_values[:len(actual_entry_positions)],  # Match array sizes  
-                                    tp_values[:len(actual_entry_positions)],  # Match array sizes
-                                    entry_points[:len(actual_entry_positions)] if entry_points is not None else None,
-                                    temp_position_signals
-                                )
-                                
-                                # Update eval_context with populated arrays
-                                eval_context['sl_price'] = sl_prices
-                                eval_context['tp_price'] = tp_prices
-                                eval_context['entry_point'] = entry_point_array
-                                
-                                # Log success
-                                sl_valid = np.sum(~np.isnan(sl_prices))
-                                tp_valid = np.sum(~np.isnan(tp_prices))
-                                print(f"   ✅ PRE-POPULATED SL/TP: {sl_valid} SL values, {tp_valid} TP values")
-                            else:
-                                print(f"   ⚠️ No actual entry positions found during pre-population")
-                        else:
-                            print(f"   ⚠️ Insufficient SL/TP data for pre-population")
+                        print(f"   ✅ SL/TP calculation data ready for post-tracking population")
                     else:
                         print(f"   ℹ️  SL/TP data exists but doesn't need population")
                 else:
                     print(f"   ⚠️ No SL/TP calculation data found")
                 
-                # Verify SL/TP arrays are populated
-                sl_valid = np.sum(~np.isnan(eval_context.get('sl_price', np.array([np.nan]))))
-                tp_valid = np.sum(~np.isnan(eval_context.get('tp_price', np.array([np.nan]))))
-                print(f"   🔍 Final SL/TP state: SL={sl_valid} valid, TP={tp_valid} valid")
+                # Initialize empty arrays for exit condition evaluation (will be populated after position tracking)
+                array_length = len(evaluation_index)
+                eval_context['sl_price'] = np.full(array_length, np.nan)
+                eval_context['tp_price'] = np.full(array_length, np.nan)
+                eval_context['entry_point'] = np.full(array_length, np.nan)
+                
+                print(f"   🔍 Initial state: Empty SL/TP arrays initialized, will populate after position tracking")
             
             # DEBUG STAGE 3: Export eval_context before exit trigger evaluation
             if self._is_debug_export_enabled():
@@ -794,11 +738,42 @@ class VectorBTSignalGenerator(ProcessorBase):
                 exit_count = exit_signals.sum()
                 print(f"🚨 EXIT EVALUATION RESULT for {group_name}.{case_name}: {exit_count} exit signals found")
                 
-                if exit_count > 0 and (uses_sl_price or uses_tp_price):
+                # PUT-SPECIFIC DEBUGGING: Check exit condition logic
+                option_type = case_config.get('OptionType', 'UNKNOWN')
+                if option_type == 'PUT' and exit_count > 0:
+                    print(f"🔍 PUT EXIT DEBUGGING for {case_name}:")
+                    print(f"   Exit condition: {exit_condition}")
+                    
+                    exit_indices = np.where(exit_signals)[0]
+                    print(f"   Exit indices: {exit_indices[:3]}{'...' if len(exit_indices) > 3 else ''}")
+                    
+                    # Check first few exit signals for PUT logic
+                    for i, idx in enumerate(exit_indices[:3]):
+                        if idx < len(eval_context.get('sl_price', [])):
+                            sl_val = eval_context['sl_price'][idx] if not np.isnan(eval_context['sl_price'][idx]) else 'NaN'
+                            tp_val = eval_context['tp_price'][idx] if not np.isnan(eval_context['tp_price'][idx]) else 'NaN'
+                            ltp_high = eval_context.get('ltp_high', [0])[idx] if idx < len(eval_context.get('ltp_high', [])) else 'N/A'
+                            ltp_low = eval_context.get('ltp_low', [0])[idx] if idx < len(eval_context.get('ltp_low', [])) else 'N/A'
+                            close_val = eval_context.get('close', [0])[idx] if idx < len(eval_context.get('close', [])) else 'N/A'
+                            ema_20_val = eval_context.get('ema_20', [0])[idx] if idx < len(eval_context.get('ema_20', [])) else 'N/A'
+                            
+                            # Check PUT exit conditions specifically
+                            sl_condition = ltp_high > sl_val if (isinstance(ltp_high, (int, float)) and isinstance(sl_val, (int, float))) else False
+                            ema_condition = close_val > ema_20_val if (isinstance(close_val, (int, float)) and isinstance(ema_20_val, (int, float))) else False
+                            
+                            print(f"   🔍 PUT Exit #{i+1} at index {idx}:")
+                            print(f"       SL={sl_val}, TP={tp_val}")
+                            print(f"       LTP_H={ltp_high}, LTP_L={ltp_low}")
+                            print(f"       Close={close_val}, EMA_20={ema_20_val}")
+                            print(f"       SL Condition (ltp_high > sl_price): {sl_condition}")
+                            print(f"       EMA Condition (close > ema_20): {ema_condition}")
+                            print(f"       Exit triggered: {sl_condition or ema_condition}")
+                            
+                elif exit_count > 0 and (uses_sl_price or uses_tp_price):
                     exit_indices = np.where(exit_signals)[0]
                     print(f"   🎯 Exit signal indices: {exit_indices[:5]}{'...' if len(exit_indices) > 5 else ''}")
                     
-                    # Sample some SL/TP vs LTP values for debugging
+                    # Sample some SL/TP vs LTP values for debugging  
                     if len(exit_indices) > 0:
                         idx = exit_indices[0]
                         if idx < len(eval_context.get('sl_price', [])):
@@ -919,6 +894,18 @@ class VectorBTSignalGenerator(ProcessorBase):
                         )
                         
                         print(f"✅ RECALCULATED SL/TP for {len(actual_entry_positions)} actual entries")
+                        
+                        # PUT-SPECIFIC DEBUGGING: Verify SL/TP values for PUT positions
+                        if case_config.get('OptionType') == 'PUT' and len(actual_entry_positions) > 0:
+                            print(f"🔍 PUT SL/TP POPULATION DEBUG for {case_config.get('case_name', 'Unknown')}:")
+                            for i, entry_pos in enumerate(actual_entry_positions[:2]):  # Check first 2 entries
+                                if i < len(actual_sl_values):
+                                    print(f"   Entry #{i+1} at position {entry_pos}:")
+                                    print(f"     Calculated SL: {actual_sl_values[i]:.2f}")
+                                    print(f"     Calculated TP: {actual_tp_values[i]:.2f}")
+                                    print(f"     Entry Point: {actual_entry_points[i]:.2f}")
+                                    print(f"     Array SL[{entry_pos}]: {sl_prices[entry_pos] if entry_pos < len(sl_prices) and not np.isnan(sl_prices[entry_pos]) else 'NaN'}")
+                                    print(f"     Array TP[{entry_pos}]: {tp_prices[entry_pos] if entry_pos < len(tp_prices) and not np.isnan(tp_prices[entry_pos]) else 'NaN'}")
                     else:
                         print(f"⚠️ No actual entry positions found - initializing empty arrays")
                         # No entries, initialize empty arrays
@@ -2564,16 +2551,21 @@ class VectorBTSignalGenerator(ProcessorBase):
                     print(f"       🔍 After setting: SL valid {actual_sl_set}, TP valid {actual_tp_set}, Entry valid {actual_entry_set}")
                 
             else:
-                # FALLBACK: Old behavior (will still cause overwriting)
-                print(f"⚠️ WARNING: No position_signals provided - using old logic (may cause entry_point overwriting)")
+                # FIXED FALLBACK: Set SL/TP only for limited duration when no position_signals
+                print(f"🔧 FIXED FALLBACK: Using safe logic without position_signals (limited duration)")
                 for i, entry_idx in enumerate(entry_indices):
-                    # Set SL/TP from entry point onwards (OLD BEHAVIOR - PROBLEMATIC)
-                    sl_prices[entry_idx:] = sl_values[i]
-                    tp_prices[entry_idx:] = tp_values[i]
+                    # CRITICAL FIX: Don't set values until end of array
+                    # Instead, set for a reasonable duration (e.g., 100 candles max)
+                    max_duration = 100  # Maximum position duration in candles
+                    end_idx = min(entry_idx + max_duration, n)
+                    
+                    print(f"   FALLBACK: Setting SL/TP for Entry {entry_idx} to limited end {end_idx}")
+                    sl_prices[entry_idx:end_idx] = sl_values[i]
+                    tp_prices[entry_idx:end_idx] = tp_values[i]
                     
                     # Set entry points if provided
                     if entry_points is not None and len(entry_points) > i:
-                        entry_point_array[entry_idx:] = entry_points[i]
+                        entry_point_array[entry_idx:end_idx] = entry_points[i]
             
             return sl_prices, tp_prices, entry_point_array
             

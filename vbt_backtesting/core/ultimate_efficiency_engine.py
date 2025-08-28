@@ -700,6 +700,26 @@ class UltimateEfficiencyEngine:
             print(f"   Calmar Ratio       :       {calmar_ratio:>7.2f}")
             print()
             
+            # Display Capital Drawdown Metrics (NEW)
+            max_capital_drawdown_pct = options_pnl.get('max_capital_drawdown_pct', 0)
+            max_capital_drawdown_amount = options_pnl.get('max_capital_drawdown_amount', 0)
+            avg_deployed_capital = options_pnl.get('avg_deployed_capital', 0)
+            max_deployed_capital = options_pnl.get('max_deployed_capital', 0)
+            capital_utilization_ratio = options_pnl.get('capital_utilization_ratio', 0)
+            max_capital_utilization = options_pnl.get('max_capital_utilization', 0)
+            capital_recovery_trades = options_pnl.get('capital_recovery_trades', 0)
+            avg_capital_recovery_time = options_pnl.get('avg_capital_recovery_time', 0)
+            
+            print(f"💰 CAPITAL DRAWDOWN ANALYTICS:")
+            print(f"   Max Capital Drawdown:       {max_capital_drawdown_pct:>6.2f}% (₹{max_capital_drawdown_amount:>10,.2f})")
+            print(f"   Avg Deployed Capital:       ₹{avg_deployed_capital:>12,.2f}")
+            print(f"   Max Deployed Capital:       ₹{max_deployed_capital:>12,.2f}")
+            print(f"   Capital Utilization :        {capital_utilization_ratio:>6.2f}% (Avg)")
+            print(f"   Max Capital Utilization:     {max_capital_utilization:>6.2f}% (Peak)")
+            print(f"   Capital Recovery Events:      {capital_recovery_trades:>6} times")
+            print(f"   Avg Recovery Time   :        {avg_capital_recovery_time:>6.1f} trades")
+            print()
+            
             # Display Portfolio Timeline Visualization
             print(f"📈 PORTFOLIO TIMELINE VISUALIZATION:")
             self._display_portfolio_timeline(options_pnl, initial_capital, final_portfolio, max_drawdown_pct, max_drawdown_amount)
