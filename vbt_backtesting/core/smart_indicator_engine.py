@@ -29,6 +29,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from core.json_config_loader import JSONConfigLoader, ConfigurationError
 from core.dynamic_warmup_calculator import DynamicWarmupCalculator
+from core.path_resolver import PathResolver
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -473,13 +474,11 @@ class SmartIndicatorEngine:
             return None
         
         try:
-            # Get database path from config
-            db_path = self.main_config.get('database', {}).get('path', '../data/valgo_market_data.db')
+            # Get database path using intelligent cross-platform resolution
             symbol = self.main_config.get('trading', {}).get('symbol', 'NIFTY')
             
-            # FAIL-FAST: Database path must exist
-            if not Path(db_path).exists():
-                raise ConfigurationError(f"Database not found at: {db_path}")
+            # Use PathResolver for intelligent path detection
+            db_path = PathResolver.get_database_path_from_config(self.main_config)
             
             conn = duckdb.connect(db_path)
             

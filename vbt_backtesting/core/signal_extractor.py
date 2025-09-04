@@ -410,6 +410,12 @@ class SignalExtractor(ProcessorBase):
             strategy_config = self._get_strategy_config_for_case(group_name, case_name)
             strike_type = strategy_config.get('StrikeType', 'ATM')
             
+            # FIX: Get option_type from strategy config instead of case_signals 
+            config_option_type = strategy_config.get('OptionType', 'CALL')
+            option_type = config_option_type if config_option_type else option_type
+            
+            print(f"🔍 DEBUG OPTION TYPE: {group_name}.{case_name} -> case_signals='{case_signals.get('option_type', 'MISSING')}', config='{config_option_type}', final='{option_type}'")
+            
             print(f"STRIKE PRE-CALCULATION: {group_name}.{case_name} using {strike_type} strikes")
             
             # Process entry signals with PRE-CALCULATED STRIKES

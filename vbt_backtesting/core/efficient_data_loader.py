@@ -31,6 +31,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from core.json_config_loader import JSONConfigLoader, ConfigurationError
 from core.dynamic_warmup_calculator import DynamicWarmupCalculator
+from core.path_resolver import PathResolver
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -87,18 +88,10 @@ class EfficientDataLoader:
         # Load configurations
         self.main_config, self.strategies_config = self.config_loader.load_all_configs()
         
-        # Get database path from JSON configuration - no defaults
+        # Get database path using intelligent cross-platform resolution
         if db_path is None:
-            db_config = self.main_config.get('database', {})
-            if not db_config.get('path'):
-                raise ConfigurationError(
-                    "Database path is required in configuration. "
-                    "Add 'database.path' to config.json or provide db_path parameter."
-                )
-            
-            # Build path relative to project root
-            project_root = Path(__file__).parent.parent.parent
-            self.db_path = str(project_root / db_config['path'])
+            # Use PathResolver for intelligent path detection
+            self.db_path = PathResolver.get_database_path_from_config(self.main_config)
         else:
             self.db_path = db_path
         self.connection = None

@@ -471,6 +471,7 @@ class OptionsPnLCalculator(ProcessorBase):
             
             for i, trade in enumerate(trades_data):
                 trade_option_type = trade.get('option_type', 'CALL')
+                print(f"🔍 DEBUG TRADE {i}: option_type='{trade_option_type}', group={trade.get('group', 'UNKNOWN')}, case={trade.get('case', 'UNKNOWN')}")
                 trades_by_option_type[trade_option_type].append((i, trade))
             
             print(f"🔧 OPTION TYPE GROUPING: {len(trades_by_option_type['CALL'])} CALL trades, {len(trades_by_option_type['PUT'])} PUT trades")

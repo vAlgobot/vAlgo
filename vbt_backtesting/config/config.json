@@ -19,11 +19,11 @@
     "timeframe": "5m",
     "lot_size": 75,
     "initial_capital": 100000,
-    "commission_per_trade": 40,
+    "commission_per_trade": 25,
     "slippage_percentage": 0
   },
   "database": {
-    "path": "data/valgo_market_data.db",
+    "path": "database/valgo_market_data.db",
     "type": "duckdb",
     "required_tables": ["ohlcv_data", "nifty_expired_option_chain"],
     "validate_on_startup": true
@@ -37,8 +37,8 @@
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2024-03-01",
-    "end_date": "2025-06-30", 
+    "start_date": "2024-04-01",
+    "end_date": "2025-03-31", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,
     "use_single_pass_processing": true,
@@ -87,14 +87,17 @@
       "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
     },
     "SL_TP_levels": {
-      "SL_TP_Method": "signal_candle_range_exit",
+      "SL_TP_Method": "cpr_pivot_range_exit",
+      "_available_methods": ["signal_candle_range_exit", "cpr_pivot_range_exit"],
       "Max_Sl_points": "45",
       "RiskRewardRatio": "1:2",
-      "buffer_sl_points": "5",
-      "buffer_tp_points": "3",
+      "max_reward_ratio": "2.0",
+      "buffer_sl_points": "0",
+      "buffer_tp_points": "0",
       "enabled": true,
-      "debug_export_enabled": true,
-      "description": "Signal candle OHLC data captured at entry identify target and stop loss using signal candle and persistent until exit - handled by VectorBT Signal Generator"
+      "debug_export_enabled": false,
+      "description": "SL/TP Method Selection: Choose 'signal_candle_range_exit' for RR-based targeting or 'cpr_pivot_range_exit' for intelligent CPR pivot targeting",
+      "_max_reward_ratio_note": "For 1:1 RR, max_reward_ratio=2.0 means maximum reward is 1:2 (2x risk). Configurable for different risk profiles."
     }
   },
   "validation": {
