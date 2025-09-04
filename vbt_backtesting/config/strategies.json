@@ -4,27 +4,17 @@
     "description": "Trend following strategies with moving average analysis",
     "max_concurrent_cases": 1,
     "cases": {
-      "CPR_SMA_CALL": {
-        "status": "Active",
+      "SIMPLE_SMA_CALL": {
+        "status": "InActive",
         "priority": 1,
-        "description": "CPR & SMA strategy",
-        "entry": "(close > cpr_r1) & (close > previous_day_high) & (close > sma_9) & (sma_9 > sma_20) & (sma_9 > sma_50) & (sma_9 > sma_200) & (close > previous_candle_high) & (ltp_high > high)",
-        "SL_Method": "signal_candle",
-        "TP_Method": "signal_candle",
+        "description": "Simple SMA test strategy",
+        "entry": "(close > sma_9) & (sma_9 > sma_20) & (close > previous_candle_high)",
+        "SL_Method": "signal_candle_range_exit",
+        "TP_Method": "signal_candle_range_exit",
         "Max_Sl_points": "45",
-        "exit": "(close < sma_9)",
+        "exit": "(close < sma_9) | (ltp_low < sl_price) | (ltp_high > tp_price)",
         "OptionType": "CALL",
         "StrikeType": "ATM"
-      },
-      "CPR_SMA_PUT": {
-        "status": "Active",
-        "priority": 1,
-        "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
-        "entry": "(close < cpr_s1) & (close < previous_day_low) & (close < sma_9) & (sma_9 < sma_20) & (sma_9 < sma_50) & (sma_9 < sma_200) & (close < previous_candle_high) & (ltp_low < low)",
-        "exit": "(close > sma_9)",
-        "OptionType": "PUT",
-        "StrikeType": "ATM",
-        "position_size": "1"
       }
     }
   },

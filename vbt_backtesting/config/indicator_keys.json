@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "generated_at": "2025-08-28T11:51:11.664887",
+    "generated_at": "2025-09-04T01:04:49.429816",
     "version": "1.0",
     "approach": "config_based_simple",
     "total_keys": 48,
@@ -208,13 +208,19 @@
         "periods": [],
         "talib_function": null,
         "config": {
-          "SL_TP_Method": "signal_candle_range_exit",
+          "SL_TP_Method": "cpr_pivot_range_exit",
+          "_available_methods": [
+            "signal_candle_range_exit",
+            "cpr_pivot_range_exit"
+          ],
           "Max_Sl_points": "45",
           "RiskRewardRatio": "1:2",
-          "buffer_sl_points": "5",
-          "buffer_tp_points": "3",
-          "debug_export_enabled": true,
-          "description": "Signal candle OHLC data captured at entry identify target and stop loss using signal candle and persistent until exit - handled by VectorBT Signal Generator"
+          "max_reward_ratio": "2.0",
+          "buffer_sl_points": "0",
+          "buffer_tp_points": "0",
+          "debug_export_enabled": false,
+          "description": "SL/TP Method Selection: Choose 'signal_candle_range_exit' for RR-based targeting or 'cpr_pivot_range_exit' for intelligent CPR pivot targeting",
+          "_max_reward_ratio_note": "For 1:1 RR, max_reward_ratio=2.0 means maximum reward is 1:2 (2x risk). Configurable for different risk profiles."
         }
       }
     },
