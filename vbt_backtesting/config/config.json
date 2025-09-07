@@ -37,8 +37,8 @@
     "use_ultra_fast_pnl": true
   },
   "backtesting": {
-    "start_date": "2024-04-01",
-    "end_date": "2025-03-31", 
+    "start_date": "2024-03-01",
+    "end_date": "2025-06-30", 
     "analysis_mode": "options_only",
     "enable_detailed_logging": true,
     "use_single_pass_processing": true,
@@ -87,10 +87,10 @@
       "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
     },
     "SL_TP_levels": {
-      "SL_TP_Method": "cpr_pivot_range_exit",
+      "SL_TP_Method": "signal_candle_range_exit",
       "_available_methods": ["signal_candle_range_exit", "cpr_pivot_range_exit"],
       "Max_Sl_points": "45",
-      "RiskRewardRatio": "1:2",
+      "RiskRewardRatio": "1:1.5",
       "max_reward_ratio": "2.0",
       "buffer_sl_points": "0",
       "buffer_tp_points": "0",
@@ -110,7 +110,7 @@
   "risk_management": {
     "max_daily_entries": 3,
     "forced_exit_time": "15:00",
-    "trading_start_time": "09:20",
+    "trading_start_time": "09:30",
     "trading_end_time": "15:00",
     "position_size_limit": 5,
     "max_drawdown_limit": 0.15

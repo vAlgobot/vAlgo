@@ -159,6 +159,7 @@ def vectorized_position_tracking_with_locked_values(
     - Ignores duplicate entries until exit
     - Evaluates exit conditions with locked values (FIXED APPROACH)
     - Supports JSON-driven SL/TP calculation methods
+    - **NEW**: Trailing Stop Loss (TSL) support with dynamic SL/TP updates
     
     Args:
         entry_conditions: Boolean array of entry signals
@@ -183,7 +184,7 @@ def vectorized_position_tracking_with_locked_values(
     try:
         n = len(entry_conditions)
         signals = np.zeros(n, dtype=int)
-        
+        #print(f"🔍 signals VALUES: {signals}")
         # Initialize locked value arrays
         locked_signal_candle_open = np.full(n, np.nan)
         locked_signal_candle_high = np.full(n, np.nan)
@@ -195,7 +196,7 @@ def vectorized_position_tracking_with_locked_values(
         
         # Filter entries by trading hours (config-based)
         valid_entries = entry_conditions & trading_hours_mask
-        
+        #print(f"🔍 valid_entries VALUES: {valid_entries}")
         # Initialize exit conditions array (will be evaluated dynamically with locked values)
         exit_conditions = np.zeros(n, dtype=bool)
         
@@ -225,53 +226,6 @@ def vectorized_position_tracking_with_locked_values(
                             print(f"   ⚠️ CONTEXT ERROR for key '{key}' at index {index}: {ctx_error}")
                         # Skip problematic keys but continue
                         continue
-                
-                # HANDLE KNOWN EXIT CONDITIONS WITH SAFE MANUAL EVALUATION
-                # if exit_condition_string == "(ltp_high > sl_price) | (ltp_low < tp_price)":
-                #     # PUT exit condition
-                #     ltp_high = point_context.get('ltp_high', 0)
-                #     ltp_low = point_context.get('ltp_low', 0) 
-                #     sl_price = point_context.get('sl_price', np.nan)
-                #     tp_price = point_context.get('tp_price', np.nan)
-                    
-                #     sl_hit = False if np.isnan(sl_price) else ltp_high > sl_price
-                #     tp_hit = False if np.isnan(tp_price) else ltp_low < tp_price
-                #     result = sl_hit or tp_hit
-                    
-                #     if index <= 20 or result:
-                #         timestamp_str = str(eval_context.get('timestamp', [pd.NaT] * (index+1))[index]) if 'timestamp' in eval_context else "Unknown"
-                #         print(f"   ✅ SAFE PUT EVAL at {index} ({timestamp_str}): ltp_high={ltp_high}, sl_price={sl_price}, sl_hit={sl_hit}, ltp_low={ltp_low}, tp_price={tp_price}, tp_hit={tp_hit}, result={result}")
-                # elif exit_condition_string == "(ltp_low < sl_price) | (ltp_high > tp_price)":
-                #     # CALL exit condition - FIXED: Added this missing case
-                #     ltp_low = point_context.get('ltp_low', 0)
-                #     ltp_high = point_context.get('ltp_high', 0)
-                #     sl_price = point_context.get('sl_price', np.nan)
-                #     tp_price = point_context.get('tp_price', np.nan)
-                    
-                #     sl_hit = False if np.isnan(sl_price) else ltp_low < sl_price  
-                #     tp_hit = False if np.isnan(tp_price) else ltp_high > tp_price
-                #     result = sl_hit or tp_hit
-                    
-                #     if index <= 20 or result:
-                #         timestamp_str = str(eval_context.get('timestamp', [pd.NaT] * (index+1))[index]) if 'timestamp' in eval_context else "Unknown"
-                #         print(f"   ✅ SAFE CALL EVAL at {index} ({timestamp_str}): ltp_low={ltp_low}, sl_price={sl_price}, sl_hit={sl_hit}, ltp_high={ltp_high}, tp_price={tp_price}, tp_hit={tp_hit}, result={result}")
-                # elif exit_condition_string == "(close < sma_9) | (ltp_low < sl_price) | (ltp_high > tp_price)":
-                #     # CALL exit condition with SMA component
-                #     close = point_context.get('close', 0)
-                #     sma_9 = point_context.get('sma_9', 0)
-                #     ltp_low = point_context.get('ltp_low', 0)
-                #     ltp_high = point_context.get('ltp_high', 0)
-                #     sl_price = point_context.get('sl_price', np.nan)
-                #     tp_price = point_context.get('tp_price', np.nan)
-                    
-                #     close_exit = close < sma_9 if not (np.isnan(close) or np.isnan(sma_9)) else False
-                #     sl_hit = False if np.isnan(sl_price) else ltp_low < sl_price  
-                #     tp_hit = False if np.isnan(tp_price) else ltp_high > tp_price
-                #     result = close_exit or sl_hit or tp_hit
-                    
-                #     if index <= 10:
-                #         print(f"   ✅ SAFE CALL EVAL at {index}: close={close}, sma_9={sma_9}, close_exit={close_exit}, sl_hit={sl_hit}, tp_hit={tp_hit}, result={result}")
-                # else:
                     #Try generic eval with proper context
                     try:
                         # Add numpy for mathematical operations
@@ -300,6 +254,69 @@ def vectorized_position_tracking_with_locked_values(
                 print(f"   🔍 DEBUG: Available context keys: {list(point_context.keys())}")
                 return False
         
+        # TSL Helper Functions
+        def check_tp_hit(index, current_price, tp_price, option_type):
+            """Check if TP was hit at current bar"""
+            if np.isnan(tp_price) or np.isnan(current_price):
+                return False
+            
+            if option_type == 'CALL':
+                return current_price >= tp_price
+            else:  # PUT
+                return current_price <= tp_price
+        
+        def update_tsl_levels(index, option_type):
+            """Update SL and calculate new TP when TP hit occurs"""
+            nonlocal locked_sl_value, locked_tp_value, tp_hit_count, previous_tp_prices
+            
+            try:
+                print(f"🔥 TSL UPDATE at index {index}: TP hit #{tp_hit_count + 1}")
+                
+                # Store current TP as previous before updating
+                if not np.isnan(locked_tp_value):
+                    previous_tp_prices.append(locked_tp_value)
+                
+                # Update SL based on TP hit count
+                if tp_hit_count == 0:
+                    # First TP hit: Move SL to breakeven (original entry point)
+                    new_sl = original_entry_point
+                    print(f"   📍 First TP hit: Moving SL to breakeven = {new_sl:.2f}")
+                else:
+                    # Subsequent TP hits: Move SL to previous TP level
+                    new_sl = previous_tp_prices[-2] if len(previous_tp_prices) >= 2 else original_entry_point
+                    print(f"   📍 TP hit #{tp_hit_count + 1}: Moving SL to previous TP = {new_sl:.2f}")
+                
+                locked_sl_value = new_sl
+                
+                # Calculate new TP using _calculate_sl_tp_for_entry with last TP as new entry point
+                last_tp = previous_tp_prices[-1] if previous_tp_prices else original_entry_point
+                new_sl_calc, new_tp = _calculate_sl_tp_for_entry(
+                    locked_entry_ohlc, case_config, last_tp, eval_context, signal_generator, index
+                )
+                
+                locked_tp_value = new_tp
+                tp_hit_count += 1
+                
+                # Log TSL event for debug export
+                tsl_event = {
+                    'index': index,
+                    'tp_hit_number': tp_hit_count,
+                    'old_sl': eval_context['sl_price'][index] if 'sl_price' in eval_context and index < len(eval_context['sl_price']) else np.nan,
+                    'new_sl': locked_sl_value,
+                    'old_tp': previous_tp_prices[-1] if previous_tp_prices else np.nan,
+                    'new_tp': locked_tp_value,
+                    'entry_point_used': last_tp
+                }
+                tsl_events.append(tsl_event)
+                
+                print(f"   ✅ TSL UPDATED: SL={locked_sl_value:.2f}, New_TP={locked_tp_value:.2f}")
+                
+                return True
+                
+            except Exception as e:
+                print(f"   ❌ TSL UPDATE ERROR at index {index}: {e}")
+                return False
+        
         # CRITICAL: Sequential stateful position tracking with value locking
         in_position = False
         current_entry_index = None
@@ -313,13 +330,24 @@ def vectorized_position_tracking_with_locked_values(
         # NEW: Track last exit indicator timestamp to prevent immediate re-entries
         last_exit_indicator_timestamp = None
         
+        # NEW: TSL (Trailing Stop Loss) state variables
+        tsl_enabled = case_config.get('TSL', '')
+        tsl_method = case_config.get('TSL_Method', '')
+        tp_hit_count = 0
+        previous_tp_prices = []  # Track TP progression for SL updates
+        original_entry_point = None  # Store original entry for reference
+        tsl_events = []  # Track TSL events for debug export
+        
         print(f"🔒 STATEFUL POSITION TRACKING: Processing {n} bars for locked value management")
+        if tsl_enabled:
+            print(f"🚀 TSL ENABLED: Method={tsl_method} for {group_name}.{case_name}")
         
         for i in range(n):
             current_indicator_time = indicator_timestamps[i] if indicator_timestamps is not None else None
-            
+            #print(f" valid current_indicator_time {current_indicator_time}")
             if valid_entries[i] and not in_position:
                 # NEW ENTRY: Check timestamp blacklist first
+                #print(f" valid entry index {valid_entries[i]}")
                 if current_indicator_time is not None and current_indicator_time in exit_timestamp_blacklist:
                     signals[i] = 0  # Skip this entry - timestamp already used
                     entries_blocked += 1
@@ -394,6 +422,14 @@ def vectorized_position_tracking_with_locked_values(
                 locked_sl_value = sl_value
                 locked_tp_value = tp_value
                 
+                # NEW: Initialize TSL state on entry
+                if tsl_enabled and tsl_method:
+                    original_entry_point = locked_entry_point_value
+                    tp_hit_count = 0
+                    previous_tp_prices = []  # Reset for new position
+                    tsl_events = []  # Reset for new position
+                    print(f"🚀 TSL INITIALIZED: Entry={original_entry_point:.2f}, Initial_SL={locked_sl_value:.2f}, Initial_TP={locked_tp_value:.2f}")
+                
                 # FIXED: Only populate locked values at current position (no slice assignment)
                 locked_signal_candle_open[i] = locked_entry_ohlc['open']
                 locked_signal_candle_high[i] = locked_entry_ohlc['high']
@@ -458,6 +494,16 @@ def vectorized_position_tracking_with_locked_values(
                     locked_sl_value = None
                     locked_tp_value = None
                     locked_entry_point_value = None
+                    
+                    # Reset TSL state after exit
+                    if tsl_enabled:
+                        final_tp_hits = tp_hit_count
+                        final_tsl_events = len(tsl_events)
+                        print(f"🔓 TSL EXIT SUMMARY: {final_tp_hits} TP hits, {final_tsl_events} TSL events recorded")
+                        tp_hit_count = 0
+                        previous_tp_prices = []
+                        original_entry_point = None
+                        tsl_events = []
                     exits_tracked += 1
                     
                     # Add this exit's timestamp to blacklist
@@ -482,6 +528,33 @@ def vectorized_position_tracking_with_locked_values(
                 eval_context['sl_price'][i] = locked_sl_value
                 eval_context['tp_price'][i] = locked_tp_value
                 eval_context['entry_point'][i] = locked_entry_point_value
+                
+                # NEW: TSL Monitoring - Check for TP hits before exit evaluation
+                if tsl_enabled and tsl_method and not np.isnan(locked_tp_value):
+                    # Get current price based on option type for TP hit detection
+                    option_type = case_config.get('OptionType', 'CALL').upper()
+                    
+                    # Use high/low for precise TP hit detection
+                    current_high = eval_context['high'][i]
+                    current_low = eval_context['low'][i]
+                    
+                    # Check if TP was hit during this bar
+                    tp_hit_occurred = False
+                    if option_type == 'CALL':
+                        tp_hit_occurred = check_tp_hit(i, current_high, locked_tp_value, option_type)
+                    else:  # PUT
+                        tp_hit_occurred = check_tp_hit(i, current_low, locked_tp_value, option_type)
+                    
+                    if tp_hit_occurred:
+                        # Update TSL levels (SL moves to breakeven/previous TP, new TP calculated)
+                        tsl_success = update_tsl_levels(i, option_type)
+                        
+                        if tsl_success:
+                            # Update eval_context with new TSL levels immediately
+                            eval_context['sl_price'][i] = locked_sl_value
+                            eval_context['tp_price'][i] = locked_tp_value
+                            
+                            print(f"🎯 TSL ACTIVE at index {i}: TP hit, SL updated to {locked_sl_value:.2f}, new TP={locked_tp_value:.2f}")
                 
                 # Also populate array tracking for export consistency
                 locked_signal_candle_open[i] = locked_entry_ohlc['open']
@@ -515,6 +588,16 @@ def vectorized_position_tracking_with_locked_values(
                     locked_tp_value = None
                     locked_entry_point_value = None
                     
+                    # Reset TSL state after exit
+                    if tsl_enabled:
+                        final_tp_hits = tp_hit_count
+                        final_tsl_events = len(tsl_events)
+                        print(f"🔓 TSL EXIT SUMMARY: {final_tp_hits} TP hits, {final_tsl_events} TSL events recorded")
+                        tp_hit_count = 0
+                        previous_tp_prices = []
+                        original_entry_point = None
+                        tsl_events = []
+                    
                     # Add this exit's Indicator_Timestamp to blacklist
                     if current_indicator_time is not None:
                         exit_timestamp_blacklist.add(current_indicator_time)
@@ -542,8 +625,15 @@ def vectorized_position_tracking_with_locked_values(
             'signal_candle_close': locked_signal_candle_close,
             'sl_price': locked_sl_price,
             'tp_price': locked_tp_price,
-            'entry_point': locked_entry_point
+            'entry_point': locked_entry_point,
+            'tsl_events': tsl_events  # NEW: Include TSL events for debug export
         }
+        
+        # TSL Summary
+        if tsl_enabled and tsl_events:
+            print(f"🎯 TSL SESSION SUMMARY: {len(tsl_events)} TSL events recorded for {group_name}.{case_name}")
+            for event in tsl_events:
+                print(f"   TP Hit #{event['tp_hit_number']} at index {event['index']}: SL {event['old_sl']:.2f}→{event['new_sl']:.2f}, TP {event['old_tp']:.2f}→{event['new_tp']:.2f}")
         
         return signals, locked_values
         
@@ -588,10 +678,10 @@ def _calculate_sl_tp_for_entry(
     """
     try:
         # Extract SL/TP methods from case config
-        sl_method = case_config.get('SL_Method', 'cpr_pivot_range_exit')
-        tp_method = case_config.get('TP_Method', 'cpr_pivot_range_exit')
-        option_type = case_config.get('OptionType', 'CALL')
-        max_sl_points = float(case_config.get('Max_Sl_points', 45))
+        sl_method = case_config.get('SL_Method', '')
+        tp_method = case_config.get('TP_Method', '')
+        option_type = case_config.get('OptionType', '')
+        max_sl_points = float(case_config.get('Max_Sl_points', 0))
         
         # Get additional config parameters from indicators.SL_TP_levels
         sl_tp_config = eval_context.get('_config_sl_tp_levels', {})
@@ -1355,6 +1445,7 @@ class VectorBTSignalGenerator(ProcessorBase):
             enhanced_case_config = case_config.copy()
             enhanced_case_config['case_name'] = case_name
             
+            print(f"🔍 entry signal VALUES: {entry_signals.values}")
             # Use new stateful position tracking with locked values (SMART APPROACH with LTP-aware entry points)
             position_signals, locked_values = vectorized_position_tracking_with_locked_values(
                 entry_signals.values,
@@ -1371,6 +1462,9 @@ class VectorBTSignalGenerator(ProcessorBase):
                 case_name,
                 self  # Pass signal_generator instance for CPR pivot TP calculation
             )
+
+            print(f"🔍 position_signals VALUES: {position_signals}")
+            print(f"🔍 locked VALUES: {locked_values}")
             
             # UPDATE EVAL_CONTEXT with locked values for exit condition re-evaluation
             print(f"🔄 UPDATING eval_context with locked values for {group_name}.{case_name}")
