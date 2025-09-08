@@ -88,6 +88,7 @@ class IndicatorKeyManager:
         """
         Generate comprehensive indicator_keys.json from config.json.
         Pure config-based approach - no parsing complexity.
+        Includes grouped indicator expansion (e.g., current_day_ohlc -> current_day_open/high/low/close).
         
         Returns:
             Dictionary of all available indicator keys
@@ -98,25 +99,28 @@ class IndicatorKeyManager:
             # Get enabled indicators from simplified config loader
             indicator_keys = self.config_loader.get_enabled_indicators_from_config()
             
+            # Apply grouped indicator expansion (same logic as SmartIndicatorEngine)
+            expanded_indicator_keys = self._expand_grouped_indicators(indicator_keys)
+            
             # Create comprehensive indicator keys JSON structure
             indicator_keys_json = {
                 "metadata": {
                     "generated_at": datetime.now().isoformat(),
                     "version": "1.0",
-                    "approach": "config_based_simple",
-                    "total_keys": len(indicator_keys),
-                    "source": "config.json enabled indicators"
+                    "approach": "config_based_simple_with_grouped_expansion",
+                    "total_keys": len(expanded_indicator_keys),
+                    "source": "config.json enabled indicators with grouped expansion"
                 },
                 "market_data_keys": {
-                    key: desc for key, desc in indicator_keys.items() 
-                    if key in ['close', 'open', 'high', 'low', 'volume', '1m_open', '1m_high', '1m_low', '1m_close', '1m_volume', 'Indicator_Timestamp']
+                    key: desc for key, desc in expanded_indicator_keys.items() 
+                    if key in ['close', 'open', 'high', 'low', 'volume', 'ltp_open', 'ltp_high', 'ltp_low', 'ltp_close', 'ltp_volume', 'Indicator_Timestamp']
                 },
                 "calculated_indicators": {
-                    key: desc for key, desc in indicator_keys.items() 
-                    if key not in ['close', 'open', 'high', 'low', 'volume', '1m_open', '1m_high', '1m_low', '1m_close', '1m_volume', 'Indicator_Timestamp']
+                    key: desc for key, desc in expanded_indicator_keys.items() 
+                    if key not in ['close', 'open', 'high', 'low', 'volume', 'ltp_open', 'ltp_high', 'ltp_low', 'ltp_close', 'ltp_volume', 'Indicator_Timestamp']
                 },
-                "all_available_keys": indicator_keys,
-                "usage_examples": self._generate_usage_examples(indicator_keys),
+                "all_available_keys": expanded_indicator_keys,
+                "usage_examples": self._generate_usage_examples(expanded_indicator_keys),
                 "configuration_source": {
                     "enabled_indicators": self._get_enabled_indicator_summary(),
                     "how_to_add_indicators": "Enable indicators in config.json with 'enabled': true",
@@ -124,7 +128,7 @@ class IndicatorKeyManager:
                 }
             }
             
-            self.selective_logger.log_detailed(f"Generated {len(indicator_keys)} indicator keys", "INFO", "INDICATOR_KEYS")
+            self.selective_logger.log_detailed(f"Generated {len(expanded_indicator_keys)} indicator keys (including grouped expansion)", "INFO", "INDICATOR_KEYS")
             return indicator_keys_json
             
         except Exception as e:
@@ -188,6 +192,7 @@ class IndicatorKeyManager:
     def validate_indicator_keys(self, current_indicators: Dict[str, Any]) -> Dict[str, Any]:
         """
         Simple validation of current indicators against available keys.
+        Uses expanded indicators to ensure grouped indicators are properly handled.
         
         Args:
             current_indicators: Dictionary of current indicator data
@@ -201,8 +206,9 @@ class IndicatorKeyManager:
             # Load existing keys file
             existing_keys = self.load_indicator_keys_json()
             
-            # Get current available keys from config
-            current_available_keys = self.config_loader.get_enabled_indicators_from_config()
+            # Get current available keys from config with expansion
+            base_available_keys = self.config_loader.get_enabled_indicators_from_config()
+            current_available_keys = self._expand_grouped_indicators(base_available_keys)
             
             # Check if keys have changed
             existing_all_keys = existing_keys.get('all_available_keys', {})
@@ -214,7 +220,8 @@ class IndicatorKeyManager:
                 'total_existing_keys': len(existing_all_keys),
                 'new_keys': set(current_available_keys.keys()) - set(existing_all_keys.keys()),
                 'removed_keys': set(existing_all_keys.keys()) - set(current_available_keys.keys()),
-                'update_needed': keys_changed
+                'update_needed': keys_changed,
+                'expanded_keys': current_available_keys
             }
             
             if keys_changed:
@@ -271,6 +278,60 @@ class IndicatorKeyManager:
             
         except Exception as e:
             return f"❌ Error generating keys summary: {e}"
+    
+    def _expand_grouped_indicators(self, indicator_keys: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Expand grouped indicators into their sub-indicators.
+        Same logic as SmartIndicatorEngine to ensure consistency.
+        
+        Args:
+            indicator_keys: Dictionary of base indicator keys
+            
+        Returns:
+            Dictionary with grouped indicators expanded into sub-indicators
+        """
+        try:
+            expanded_keys = indicator_keys.copy()
+            
+            # Get main config to check for grouped indicators
+            main_config = self.config_loader.get_main_config()
+            indicators_config = main_config.get('indicators', {})
+            
+            # Handle current_day_ohlc expansion
+            current_day_cfg = indicators_config.get('current_day_ohlc', {})
+            if (isinstance(current_day_cfg, dict) and current_day_cfg.get('enabled', False)) or current_day_cfg is True:
+                expanded_keys['current_day_open'] = "Current day opening price (first candle of day)"
+                expanded_keys['current_day_high'] = "Current day high price (running max within day)"
+                expanded_keys['current_day_low'] = "Current day low price (running min within day)"
+                expanded_keys['current_day_close'] = "Current day close price (current candle close)"
+            
+            # Handle previous_candle_ohlc expansion
+            prev_candle_cfg = indicators_config.get('previous_candle_ohlc', {})
+            if (isinstance(prev_candle_cfg, dict) and prev_candle_cfg.get('enabled', False)) or prev_candle_cfg is True:
+                expanded_keys['previous_candle_open'] = "Previous candle opening price"
+                expanded_keys['previous_candle_high'] = "Previous candle high price"
+                expanded_keys['previous_candle_low'] = "Previous candle low price"
+                expanded_keys['previous_candle_close'] = "Previous candle close price"
+            
+            # Handle signal_candle expansion
+            signal_candle_cfg = indicators_config.get('signal_candle', {})
+            if (isinstance(signal_candle_cfg, dict) and signal_candle_cfg.get('enabled', False)) or signal_candle_cfg is True:
+                expanded_keys['signal_candle_open'] = "Signal candle opening price (captured at entry)"
+                expanded_keys['signal_candle_high'] = "Signal candle high price (captured at entry)"
+                expanded_keys['signal_candle_low'] = "Signal candle low price (captured at entry)"
+                expanded_keys['signal_candle_close'] = "Signal candle close price (captured at entry)"
+            
+            # Handle SL_TP_levels expansion
+            sl_tp_cfg = indicators_config.get('SL_TP_levels', {})
+            if (isinstance(sl_tp_cfg, dict) and sl_tp_cfg.get('enabled', False)) or sl_tp_cfg is True:
+                expanded_keys['sl_price'] = "Stop Loss price (calculated at entry)"
+                expanded_keys['tp_price'] = "Take Profit price (calculated at entry)"
+            
+            return expanded_keys
+            
+        except Exception as e:
+            self.selective_logger.log_detailed(f"Error expanding grouped indicators: {e}", "WARNING", "INDICATOR_KEYS")
+            return indicator_keys  # Return original if expansion fails
     
     def _is_keys_file_current(self) -> bool:
         """Check if indicator keys file is current with config.json"""
@@ -415,8 +476,9 @@ class IndicatorKeyManager:
         try:
             # Silent validation - no logging to avoid emoji encoding issues
             
-            # Get current available indicators
-            available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            # Get current available indicators with expansion
+            base_available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            available_indicators = self._expand_grouped_indicators(base_available_indicators)
             available_keys = set(available_indicators.keys())
             
             # Get active strategies
@@ -656,6 +718,16 @@ class IndicatorKeyManager:
                 # Show what changed and newly available keys
                 self._display_config_changes_simple()
                 self._display_newly_available_keys()
+                
+                # Stop system to notify user about new keys
+                print(f"\n" + "="*60)
+                print(f"🔄 NEW INDICATOR KEYS DETECTED")
+                print(f"="*60)
+                print(f"System has detected new indicator keys in your configuration.")
+                print(f"Please review the updated indicator_keys.json file and update your strategies accordingly.")
+                print(f"Available keys have been updated and are ready for use in strategies.json")
+                print(f"="*60)
+                raise ConfigurationError("New indicator keys detected - please review and update strategies")
             
             # Step 2: Run comprehensive validation
             validation_report = self.validate_strategies_against_indicators()
@@ -822,8 +894,9 @@ class IndicatorKeyManager:
     def _display_newly_available_keys(self) -> None:
         """Display newly available indicator keys for user reference."""
         try:
-            # Get current available indicators
-            available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            # Get current available indicators with expansion
+            base_available_indicators = self.config_loader.get_enabled_indicators_from_config()
+            available_indicators = self._expand_grouped_indicators(base_available_indicators)
             
             print(f"\nNEWLY AVAILABLE INDICATOR KEYS:")
             

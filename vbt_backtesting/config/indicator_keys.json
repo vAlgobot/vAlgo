@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "generated_at": "2025-09-04T01:04:49.429816",
+    "generated_at": "2025-09-08T09:25:48.331914",
     "version": "1.0",
-    "approach": "config_based_simple",
-    "total_keys": 48,
-    "source": "config.json enabled indicators"
+    "approach": "config_based_simple_with_grouped_expansion",
+    "total_keys": 53,
+    "source": "config.json enabled indicators with grouped expansion"
   },
   "market_data_keys": {
     "close": "Closing price series (5m)",
@@ -12,14 +12,14 @@
     "high": "High price series (5m)",
     "low": "Low price series (5m)",
     "volume": "Volume series (5m)",
-    "Indicator_Timestamp": "Timestamp of 5m candle providing indicators (debugging)"
-  },
-  "calculated_indicators": {
     "ltp_open": "1-minute opening price for execution timing",
     "ltp_high": "1-minute high price for breakout detection",
     "ltp_low": "1-minute low price for breakdown detection",
     "ltp_close": "1-minute closing price for execution confirmation",
     "ltp_volume": "1-minute volume for execution validation",
+    "Indicator_Timestamp": "Timestamp of 5m candle providing indicators (debugging)"
+  },
+  "calculated_indicators": {
     "rsi_14": "RSI with 14 period",
     "rsi_21": "RSI with 21 period",
     "sma_9": "SMA with 9 period",
@@ -47,16 +47,21 @@
     "previous_day_high": "Previous Day HIGH",
     "previous_day_low": "Previous Day LOW",
     "previous_day_close": "Previous Day CLOSE",
-    "previous_candle_open": "Previous candle OPEN",
-    "previous_candle_high": "Previous candle HIGH",
-    "previous_candle_low": "Previous candle LOW",
-    "previous_candle_close": "Previous candle CLOSE",
-    "signal_candle_open": "Signal candle OPEN - captured at entry, persistent until exit",
-    "signal_candle_high": "Signal candle HIGH - captured at entry, persistent until exit",
-    "signal_candle_low": "Signal candle LOW - captured at entry, persistent until exit",
-    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit",
-    "sl_price": "Stop Loss price - calculated at entry using signal candle range, persistent until exit",
-    "tp_price": "Take Profit price - calculated at entry using signal candle range, persistent until exit"
+    "previous_candle_open": "Previous candle opening price",
+    "previous_candle_high": "Previous candle high price",
+    "previous_candle_low": "Previous candle low price",
+    "previous_candle_close": "Previous candle close price",
+    "signal_candle_open": "Signal candle opening price (captured at entry)",
+    "signal_candle_high": "Signal candle high price (captured at entry)",
+    "signal_candle_low": "Signal candle low price (captured at entry)",
+    "signal_candle_close": "Signal candle close price (captured at entry)",
+    "current_day_ohlc": "CURRENT_DAY_OHLC indicator",
+    "sl_price": "Stop Loss price (calculated at entry)",
+    "tp_price": "Take Profit price (calculated at entry)",
+    "current_day_open": "Current day opening price (first candle of day)",
+    "current_day_high": "Current day high price (running max within day)",
+    "current_day_low": "Current day low price (running min within day)",
+    "current_day_close": "Current day close price (current candle close)"
   },
   "all_available_keys": {
     "close": "Closing price series (5m)",
@@ -97,16 +102,21 @@
     "previous_day_high": "Previous Day HIGH",
     "previous_day_low": "Previous Day LOW",
     "previous_day_close": "Previous Day CLOSE",
-    "previous_candle_open": "Previous candle OPEN",
-    "previous_candle_high": "Previous candle HIGH",
-    "previous_candle_low": "Previous candle LOW",
-    "previous_candle_close": "Previous candle CLOSE",
-    "signal_candle_open": "Signal candle OPEN - captured at entry, persistent until exit",
-    "signal_candle_high": "Signal candle HIGH - captured at entry, persistent until exit",
-    "signal_candle_low": "Signal candle LOW - captured at entry, persistent until exit",
-    "signal_candle_close": "Signal candle CLOSE - captured at entry, persistent until exit",
-    "sl_price": "Stop Loss price - calculated at entry using signal candle range, persistent until exit",
-    "tp_price": "Take Profit price - calculated at entry using signal candle range, persistent until exit"
+    "previous_candle_open": "Previous candle opening price",
+    "previous_candle_high": "Previous candle high price",
+    "previous_candle_low": "Previous candle low price",
+    "previous_candle_close": "Previous candle close price",
+    "signal_candle_open": "Signal candle opening price (captured at entry)",
+    "signal_candle_high": "Signal candle high price (captured at entry)",
+    "signal_candle_low": "Signal candle low price (captured at entry)",
+    "signal_candle_close": "Signal candle close price (captured at entry)",
+    "current_day_ohlc": "CURRENT_DAY_OHLC indicator",
+    "sl_price": "Stop Loss price (calculated at entry)",
+    "tp_price": "Take Profit price (calculated at entry)",
+    "current_day_open": "Current day opening price (first candle of day)",
+    "current_day_high": "Current day high price (running max within day)",
+    "current_day_low": "Current day low price (running min within day)",
+    "current_day_close": "Current day close price (current candle close)"
   },
   "usage_examples": {
     "simple_condition": "close > ma_20",
@@ -203,18 +213,26 @@
           "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
         }
       },
+      "current_day_ohlc": {
+        "enabled": true,
+        "periods": [],
+        "talib_function": null,
+        "config": {
+          "description": "currentday candle OHLC data"
+        }
+      },
       "SL_TP_levels": {
         "enabled": true,
         "periods": [],
         "talib_function": null,
         "config": {
-          "SL_TP_Method": "cpr_pivot_range_exit",
+          "SL_TP_Method": "signal_candle_range_exit",
           "_available_methods": [
             "signal_candle_range_exit",
             "cpr_pivot_range_exit"
           ],
           "Max_Sl_points": "45",
-          "RiskRewardRatio": "1:2",
+          "RiskRewardRatio": "1:1.5",
           "max_reward_ratio": "2.0",
           "buffer_sl_points": "0",
           "buffer_tp_points": "0",

@@ -86,6 +86,11 @@
       "enabled": true,
       "description": "Signal candle OHLC data captured at entry and persistent until exit - handled by VectorBT Signal Generator"
     },
+    "current_day_ohlc":
+    {
+      "enabled": true,
+      "description": "currentday candle OHLC data"
+    },
     "SL_TP_levels": {
       "SL_TP_Method": "signal_candle_range_exit",
       "_available_methods": ["signal_candle_range_exit", "cpr_pivot_range_exit"],

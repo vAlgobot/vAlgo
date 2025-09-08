@@ -112,6 +112,16 @@ class SmartIndicatorEngine:
         
         # Extract simplified configuration (config-based approach)
         self.enabled_indicators = self.config_loader.get_enabled_indicators_from_config()
+        # Expand grouped indicators from config into concrete keys
+        try:
+            current_day_cfg = self.main_config.get('indicators', {}).get('current_day_ohlc', {})
+            if (isinstance(current_day_cfg, dict) and current_day_cfg.get('enabled', False)) or current_day_cfg is True:
+                self.enabled_indicators['current_day_open'] = True
+                self.enabled_indicators['current_day_high'] = True
+                self.enabled_indicators['current_day_low'] = True
+                self.enabled_indicators['current_day_close'] = True
+        except Exception:
+            pass
         self.all_indicators = self._get_all_available_indicators()
         
         # Performance tracking (simplified approach)
@@ -136,6 +146,8 @@ class SmartIndicatorEngine:
         # CPR calculation cache for ultra-fast performance
         self._cpr_cache = {}
         self._current_ohlcv_data = None
+        # Current day OHLC cache (per data slice)
+        self._current_day_cache = {}
         
         # Simplified logging - avoid duplicate messages when used in multiple components
         if not hasattr(SmartIndicatorEngine, '_initialized_count'):
@@ -184,9 +196,12 @@ class SmartIndicatorEngine:
             'Indicator_Timestamp'  # Debugging column
         }
         
-        # Process only enabled indicators from config (exclude market data keys)
-        enabled_indicator_keys = [key for key in self.enabled_indicators.keys() 
-                                 if key not in MARKET_DATA_KEYS]
+        # Process only enabled indicators from config (exclude market data keys and grouped keys)
+        EXCLUDED_KEYS = set(MARKET_DATA_KEYS)
+        # Exclude grouped indicator parent key; we expand it into sub-keys separately
+        EXCLUDED_KEYS.add('current_day_ohlc')
+        enabled_indicator_keys = [key for key in self.enabled_indicators.keys()
+                                  if key not in EXCLUDED_KEYS]
         
         print(f"🔧 Calculating {len(enabled_indicator_keys)} enabled indicators...")
         
@@ -1066,7 +1081,13 @@ class SmartIndicatorEngine:
                         for period in indicator_config['periods']:
                             all_indicators.append(f"{indicator_name}_{period}")
                     else:
-                        all_indicators.append(indicator_name)
+                        # Expand grouped indicators into concrete keys
+                        if indicator_name == 'current_day_ohlc':
+                            all_indicators.extend([
+                                'current_day_open', 'current_day_high', 'current_day_low', 'current_day_close'
+                            ])
+                        else:
+                            all_indicators.append(indicator_name)
             else:
                 # Skip invalid configuration types
                 continue
@@ -1173,6 +1194,21 @@ class SmartIndicatorEngine:
             else:
                 available_keys = list(prev_results.keys())
                 raise ConfigurationError(f"Previous candle sub-indicator '{indicator_name}' not found. Available: {available_keys}")
+
+        # SPECIAL HANDLING FOR CURRENT DAY OHLC SUB-INDICATORS
+        if indicator_name.startswith('current_day_'):
+            # Compute once per dataset and cache
+            data_id = (data.index[0] if len(data.index) > 0 else None,
+                       data.index[-1] if len(data.index) > 0 else None,
+                       len(data))
+            cache_key = f"current_day_{hash(data_id)}"
+            if cache_key not in self._current_day_cache:
+                self._current_day_cache[cache_key] = self._calculate_current_day_ohlc_batch(data)
+            cd = self._current_day_cache[cache_key]
+            if indicator_name in cd:
+                return pd.Series(cd[indicator_name], index=data.index, name=indicator_name)
+            else:
+                raise ConfigurationError(f"Current day sub-indicator '{indicator_name}' not found")
         
         # SKIP SIGNAL CANDLE INDICATORS - handled exclusively by VectorBT Signal Generator
         if indicator_name.startswith('signal_candle_'):
@@ -1221,6 +1257,43 @@ class SmartIndicatorEngine:
         
         # Convert to pandas Series with original index
         return pd.Series(indicator_values, index=data.index, name=indicator_name)
+
+    def _calculate_current_day_ohlc_batch(self, data: pd.DataFrame) -> Dict[str, np.ndarray]:
+        """
+        Calculate dynamic current-day OHLC up to each candle efficiently.
+
+        - current_day_open: first open of each trading day
+        - current_day_high: running max of high within the day
+        - current_day_low: running min of low within the day
+        - current_day_close: current close (per candle)
+
+        Resets at daily boundaries.
+        """
+        try:
+            if len(data) == 0:
+                raise ConfigurationError("Empty data for current_day_ohlc calculation")
+
+            # Group by calendar date component of the index
+            if hasattr(data.index, 'date'):
+                day_keys = pd.Series([d for d in data.index.date], index=data.index)
+            else:
+                idx = pd.to_datetime(data.index)
+                day_keys = pd.Series([d.date() for d in idx], index=data.index)
+
+            # Use vectorized per-day calculations
+            day_first_open = data['open'].groupby(day_keys).transform('first')
+            day_running_high = data['high'].groupby(day_keys).cummax()
+            day_running_low = data['low'].groupby(day_keys).cummin()
+            day_current_close = data['close']
+
+            return {
+                'current_day_open': day_first_open.values,
+                'current_day_high': day_running_high.values,
+                'current_day_low': day_running_low.values,
+                'current_day_close': day_current_close.values
+            }
+        except Exception as e:
+            raise ConfigurationError(f"Current day OHLC calculation failed: {e}")
     
     def _create_vectorbt_indicator(self, indicator_name: str, data: pd.DataFrame) -> Any:
         """Create VectorBT IndicatorFactory for a specific indicator."""

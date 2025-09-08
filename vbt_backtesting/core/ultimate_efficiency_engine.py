@@ -286,8 +286,8 @@ class UltimateEfficiencyEngine:
             for indicator_name, indicator_values in indicators.items():
                 if hasattr(indicator_values, '__len__') and len(indicator_values) == len(market_data):
                     # Apply same mask to indicator values
-                    if hasattr(indicator_values, 'iloc'):  # pandas Series
-                        filtered_indicators[indicator_name] = indicator_values.iloc[backtest_mask]
+                    if hasattr(indicator_values, 'loc'):  # pandas Series
+                        filtered_indicators[indicator_name] = indicator_values.loc[backtest_mask]
                     else:  # numpy array
                         filtered_indicators[indicator_name] = indicator_values[backtest_mask]
                 else:
