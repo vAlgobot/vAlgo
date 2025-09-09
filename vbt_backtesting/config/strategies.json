@@ -1,5 +1,5 @@
 {
-  "EMA_TrendFollow": {
+  "EMA_TrendFollow_Call": {
     "status": "Active",
     "description": "Trend following strategies with moving average analysis",
     "max_concurrent_cases": 1,
@@ -9,53 +9,57 @@
         "status": "Active",
         "priority": 1,
         "description": "CPR & SMA strategy",
-        "entry": "(close > previous_day_high) & (close > cpr_r1) & (close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (previous_candle_close > previous_candle_open) & (close > previous_candle_high) & (close > open) & (ltp_high > high)",
+        "entry": "(close > previous_day_high) & (close > cpr_r1) & (close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (previous_candle_close > previous_candle_open) & (close > previous_candle_low) & (close > open) & (ltp_high > high)",
         "exit": "(ltp_low < sl_price) | (close < ema_20)",
         "OptionType": "CALL",
         "StrikeType": "ATM",
         "position_size": "1",
         "TSL":true,
-        "SL_Method":"signal_candle_range_exit",
-        "TP_Method":"signal_candle_range_exit",
+        "SL_Method":"cpr_pivot_range_exit",
+        "TP_Method":"cpr_pivot_range_exit",
         "Max_Sl_points":"45",
-        "TSL_Method":"signal_candle_range_exit"
-        
+        "TSL_Method":"cpr_pivot_range_exit"     
       },
       "CPR_EMA_PUT": {
-        "status": "Active",
+        "status": "InActive",
         "priority": 1,
         "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
-        "entry": "(close < previous_day_low) &  (close < cpr_s1) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (previous_candle_close < previous_candle_open) & (close < previous_candle_low) & (close < open) & (ltp_low < low)",
+        "entry": "(close < previous_day_low) & (close < cpr_s1) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (previous_candle_close < previous_candle_open) & (close < previous_candle_low) & (close < open) & (ltp_low < low)",
         "exit": "(ltp_high > sl_price) | (close > ema_20)",
         "OptionType": "PUT",
         "StrikeType": "ATM",
         "position_size": "1",
-        "SL_Method":"signal_candle_range_exit",
-        "TP_Method":"signal_candle_range_exit",
+        "SL_Method":"cpr_pivot_range_exit",
+        "TP_Method":"cpr_pivot_range_exit",
         "TSL":true,
         "Max_Sl_points":"45",
-        "TSL_Method":"signal_candle_range_exit"
+        "TSL_Method":"cpr_pivot_range_exit"
       }
     }
   },
-  "EMA_TrendFollow_PDH_PDL": {
-    "status": "InActive",
+  "EMA_TrendFollow_PUT": {
+    "status": "Active",
     "description": "Trend following strategies with moving average analysis",
     "max_concurrent_cases": 1,
     "cases": {
-      "CPR_EMA_CALL_PDH": {
-        "status": "Active",
+      "CPR_EMA_PUT": {
+      "status": "Active",
         "priority": 1,
-        "description": "CPR & SMA strategy",
-        "entry": "(close > previous_day_high) & (close > ema_9) & (ema_9 > ema_20) & (ema_20 > ema_50) & (ema_50 > ema_200) & (previous_candle_close > previous_candle_open) & (close > previous_candle_high) & (close > open)",
-        "exit": "(ltp_low < sl_price) | (close < ema_20)",
-        "OptionType": "CALL",
+        "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
+        "entry": "(close < previous_day_low) & (close < cpr_s1) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (previous_candle_close < previous_candle_open) & (close < previous_candle_low) & (close < open) & (ltp_low < low)",
+        "exit": "(ltp_high > sl_price) | (close > ema_20)",
+        "OptionType": "PUT",
         "StrikeType": "ATM",
-        "position_size": "1"
+        "position_size": "1",
+        "SL_Method":"cpr_pivot_range_exit",
+        "TP_Method":"cpr_pivot_range_exit",
+        "TSL":true,
+        "Max_Sl_points":"45",
+        "TSL_Method":"cpr_pivot_range_exit"
         
       },
       "CPR_EMA_PUT_PDL": {
-        "status": "Active",
+        "status": "InActive",
         "priority": 1,
         "description": "Multi-SMA trend entry (9>20>50>200), exit on close < SMA20",
         "entry": "(close < previous_day_low) & (close < ema_9) & (ema_9 < ema_20) & (ema_20 < ema_50) & (ema_50 < ema_200) & (close < open)",
@@ -90,5 +94,4 @@
       }
     }
   }
-}
-}
+}}

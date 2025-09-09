@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "generated_at": "2025-09-08T09:25:48.331914",
+    "generated_at": "2025-09-08T23:27:13.702280",
     "version": "1.0",
     "approach": "config_based_simple_with_grouped_expansion",
     "total_keys": 53,
@@ -226,7 +226,7 @@
         "periods": [],
         "talib_function": null,
         "config": {
-          "SL_TP_Method": "signal_candle_range_exit",
+          "SL_TP_Method": "cpr_pivot_range_exit",
           "_available_methods": [
             "signal_candle_range_exit",
             "cpr_pivot_range_exit"
@@ -234,8 +234,8 @@
           "Max_Sl_points": "45",
           "RiskRewardRatio": "1:1.5",
           "max_reward_ratio": "2.0",
-          "buffer_sl_points": "0",
-          "buffer_tp_points": "0",
+          "buffer_sl_points": "5",
+          "buffer_tp_points": "5",
           "debug_export_enabled": false,
           "description": "SL/TP Method Selection: Choose 'signal_candle_range_exit' for RR-based targeting or 'cpr_pivot_range_exit' for intelligent CPR pivot targeting",
           "_max_reward_ratio_note": "For 1:1 RR, max_reward_ratio=2.0 means maximum reward is 1:2 (2x risk). Configurable for different risk profiles."
